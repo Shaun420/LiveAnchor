@@ -2,43 +2,86 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Avatar Overlay MVP</title>
+  <title>Avatar Overlay MVP | LiveAnchor</title>
   <link rel="stylesheet" href="style.css" />
 
   <script type="importmap">
   {
     "imports": {
-      "three": "https://cdn.jsdelivr.net/npm/three@0.185.1/build/three.module.min.js"
+      "three": "https://cdn.jsdelivr.net/npm/three@0.185.1/build/three.module.min.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.185.1/examples/jsm/",
+      "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.5.5/lib/three-vrm.module.min.js"
     }
   }
   </script>
 </head>
 <body>
 
-<div class="container">
-  <div class="stage">
-    <!-- Live webcam + avatar overlay -->
+<!-- Main Stage -->
+<div class="app">
+  <div class="stage" id="stage">
     <video id="webcam" autoplay playsinline muted></video>
+    <canvas id="bgCanvas"></canvas>
     <canvas id="overlay"></canvas>
+    <div class="hud">
+      <span id="fps">0 FPS</span>
+      <span id="trackingStatus">● No tracking</span>
+    </div>
   </div>
 
-  <div class="controls">
-    <button id="startBtn">Start Camera</button>
-    <p id="status">Idle</p>
-	<input type="file" id="vrmInput" accept=".vrm" />
+  <!-- Side Panel -->
+  <div class="panel" id="panel">
+    <h2>LiveAnchor</h2>
+    <p class="subtitle">Real-time Avatar Overlay</p>
+
+    <div class="section">
+      <h3>Camera</h3>
+      <button id="startBtn" class="btn primary">Start Camera</button>
+      <label class="toggle">
+        <input type="checkbox" id="mirrorToggle" checked />
+        <span>Mirror</span>
+      </label>
+    </div>
+
+    <div class="section">
+      <h3>Avatar</h3>
+      <label class="file-btn">
+        Upload VRM
+        <input type="file" id="vrmInput" accept=".vrm" hidden />
+      </label>
+      <button id="calibrateBtn" class="btn">Calibrate Neutral</button>
+    </div>
+
+    <div class="section">
+      <h3>Tracking</h3>
+      <label class="toggle">
+        <input type="checkbox" id="bodyToggle" checked />
+        <span>Body Tracking</span>
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="bgToggle" />
+        <span>Remove Background</span>
+      </label>
+      <label class="slider-label">
+        Smoothing
+        <input type="range" id="smoothSlider" min="0" max="100" value="50" />
+      </label>
+    </div>
+
+    <div class="section">
+      <h3>Recording</h3>
+      <button id="recordBtn" class="btn record">● Record</button>
+      <span id="recordStatus" class="record-status"></span>
+    </div>
+
+    <div class="section debug" id="debugSection">
+      <h3>Debug</h3>
+      <pre id="debugInfo">Waiting for camera...</pre>
+    </div>
   </div>
 </div>
 
-<!-- MediaPipe Tasks Vision -->
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/vision_bundle.mjs"
-        type="module"></script>
-
-<!-- Three.js -->
-<!-- <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script> -->
-
-<!-- App -->
-<script src="avatar.js" type="module"></script>
-<script src="main.js" type="module"></script>
+<script src="app.js" type="module"></script>
 
 </body>
 </html>
