@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Avatar Overlay MVP</title>
+  <link rel="stylesheet" href="style.css" />
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.185.1/build/three.module.min.js"
+    }
+  }
+  </script>
+</head>
+<body>
+
+<div class="container">
+  <div class="stage">
+    <!-- Live webcam + avatar overlay -->
+    <video id="webcam" autoplay playsinline muted></video>
+    <canvas id="overlay"></canvas>
+  </div>
+
+  <div class="controls">
+    <button id="startBtn">Start Camera</button>
+    <p id="status">Idle</p>
+	<input type="file" id="vrmInput" accept=".vrm" />
+  </div>
+</div>
+
+<!-- MediaPipe Tasks Vision -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/vision_bundle.mjs"
+        type="module"></script>
+
+<!-- Three.js -->
+<!-- <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script> -->
+
+<!-- App -->
+<script src="avatar.js" type="module"></script>
+<script src="main.js" type="module"></script>
+
+</body>
+</html>
