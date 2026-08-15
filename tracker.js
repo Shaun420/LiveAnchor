@@ -39,7 +39,8 @@ export class Tracker {
     this.smoothing = 0.5;
 
     // Smoothing state
-    this.prev = null;
+    this.prevFace = null;
+    this.prevBody = null;
   }
 
   async init() {
@@ -118,12 +119,9 @@ export class Tracker {
     }
 
     // --- Body tracking ---
-    // Only attempt body tracking if we have a face to validate against.
-    // Without a face, _extractBody would crash on face.y reference.
     if (this.enableBody && result.face) {
       const poseResults = this.poseLandmarker.detectForVideo(video, timestamp);
       if (poseResults.landmarks && poseResults.landmarks.length > 0) {
-        // _extractBody may return null if landmarks look unreliable
         result.body = this._extractBody(
           poseResults.landmarks[0],
           video,
@@ -131,29 +129,38 @@ export class Tracker {
         );
       }
 
-      // If real body detection failed (null), synthesize from face
+      // Synthesize from face if real body not available
       if (!result.body) {
         result.body = this._synthesizeBody(result.face, w, h);
       }
     }
 
-    // --- Smoothing (face only) ---
+    // --- Smoothing ---
     if (result.face) {
-      result.face = this._smooth(result.face);
+      result.face = this._smoothFace(result.face);
+    }
+    if (result.body) {
+      result.body = this._smoothBody(result.body);
     }
 
     return result;
   }
 
   _synthesizeBody(face, w, h) {
-    // Estimate body parts based on face position.
-    // Shoulders are ~2.5 eye-distances below and ~2.2 eye-distances apart.
     const shoulderY = face.y + face.eyeDistance * 2.5;
     const shoulderHalfWidth = face.eyeDistance * 2.2;
 
+    const leftShoulder = { x: face.x - shoulderHalfWidth, y: shoulderY };
+    const rightShoulder = { x: face.x + shoulderHalfWidth, y: shoulderY };
+
+    const shoulderMidX = (leftShoulder.x + rightShoulder.x) / 2;
+    const shoulderMidY = (leftShoulder.y + rightShoulder.y) / 2;
+    const shoulderWidth = shoulderHalfWidth * 2;
+    const shoulderTilt = 0;
+
     return {
-      leftShoulder: { x: face.x - shoulderHalfWidth, y: shoulderY },
-      rightShoulder: { x: face.x + shoulderHalfWidth, y: shoulderY },
+      leftShoulder,
+      rightShoulder,
       leftElbow: {
         x: face.x - shoulderHalfWidth * 1.3,
         y: shoulderY + face.eyeDistance * 2,
@@ -171,6 +178,16 @@ export class Tracker {
         y: shoulderY + face.eyeDistance * 4,
       },
       nose: { x: face.x, y: face.y },
+
+      // Processed shoulder data
+      shoulderMidX,
+      shoulderMidY,
+      shoulderMidXNorm: shoulderMidX / w,
+      shoulderMidYNorm: shoulderMidY / h,
+      shoulderWidth,
+      shoulderWidthNorm: shoulderWidth / w,
+      shoulderTilt,
+
       synthesized: true,
     };
   }
@@ -201,23 +218,17 @@ export class Tracker {
     const upperLip = this._get2D(landmarks, IDX.UPPER_LIP, w, h);
     const lowerLip = this._get2D(landmarks, IDX.LOWER_LIP, w, h);
 
-    // Eye center (used as face anchor position)
     const eyeCenterX = (leftEye.x + rightEye.x) / 2;
     const eyeCenterY = (leftEye.y + rightEye.y) / 2;
 
-    // Face center (used for debug display only)
-    const faceCenterX = (eyeCenterX + nose.x) / 2;
-    const faceCenterY = (eyeCenterY + chin.y) / 2;
-
-    // Scale
     const eyeDistance = this._dist2D(leftEye, rightEye);
 
-    // Roll from 2D eye line
+    // Roll
     const dx = rightEye.x - leftEye.x;
     const dy = rightEye.y - leftEye.y;
     const roll = Math.atan2(dy, dx);
 
-    // Yaw and Pitch from 3D world landmarks
+    // Yaw and Pitch
     let yaw = 0;
     let pitch = 0;
 
@@ -232,7 +243,6 @@ export class Tracker {
         z: (leftEye3D.z + rightEye3D.z) / 2,
       };
 
-      // Forward vector: from eye center toward nose
       const fwd = {
         x: nose3D.x - eyeCenter3D.x,
         y: nose3D.y - eyeCenter3D.y,
@@ -246,7 +256,6 @@ export class Tracker {
       yaw = Math.atan2(fwd.x, fwd.z);
       pitch = Math.asin(Math.max(-1, Math.min(1, -fwd.y)));
     } else {
-      // Fallback: estimate from 2D landmarks
       const eyeMid = eyeCenterX;
       const faceWidth = this._dist2D(
         this._get2D(landmarks, IDX.LEFT_EAR, w, h),
@@ -254,32 +263,18 @@ export class Tracker {
       );
       yaw = ((nose.x - eyeMid) / (faceWidth || 1)) * 1.2;
       pitch =
-        ((nose.y - eyeCenterY) /
-          (this._dist2D(forehead, chin) || 1)) *
-        0.8;
+        ((nose.y - eyeCenterY) / (this._dist2D(forehead, chin) || 1)) * 0.8;
     }
 
-    // Mouth openness
     const mouthOpen = this._dist2D(upperLip, lowerLip) / (eyeDistance || 1);
 
     return {
-      // Pixel position of eye center (used by _extractBody validation)
       x: eyeCenterX,
       y: eyeCenterY,
-
-      // Normalized position [0..1] relative to video frame
-      // xNorm=0 is left edge, xNorm=1 is right edge
-      // yNorm=0 is top edge, yNorm=1 is bottom edge
       xNorm: eyeCenterX / w,
       yNorm: eyeCenterY / h,
-
       eyeDistance,
       eyeDistanceNorm: eyeDistance / w,
-
-      // For debug display
-      faceX: faceCenterX,
-      faceY: faceCenterY,
-
       yaw: yaw - this.calibration.yaw,
       pitch: pitch - this.calibration.pitch,
       roll: roll - this.calibration.roll,
@@ -299,7 +294,6 @@ export class Tracker {
   }
 
   _extractBody(landmarks, video, face) {
-    // Guard: face must be valid since we use face.y for validation
     if (!face) return null;
 
     const w = video.videoWidth;
@@ -308,6 +302,7 @@ export class Tracker {
     const get = (idx) => ({
       x: landmarks[idx].x * w,
       y: landmarks[idx].y * h,
+      visibility: landmarks[idx].visibility || 0,
     });
 
     const leftShoulder = get(11);
@@ -315,7 +310,7 @@ export class Tracker {
     const leftElbow = get(13);
     const rightElbow = get(14);
 
-    // Validate: shoulders must be within frame and below the face
+    // Validate: shoulders visible and below face
     if (
       leftShoulder.x < 0 ||
       leftShoulder.x > w ||
@@ -324,8 +319,17 @@ export class Tracker {
       leftShoulder.y < face.y ||
       rightShoulder.y < face.y
     ) {
-      return null; // pose detection unreliable, caller will synthesize
+      return null;
     }
+
+    // Compute shoulder metrics
+    const shoulderDx = rightShoulder.x - leftShoulder.x;
+    const shoulderDy = rightShoulder.y - leftShoulder.y;
+    const shoulderWidth = Math.hypot(shoulderDx, shoulderDy);
+    const shoulderTilt = Math.atan2(shoulderDy, shoulderDx);
+
+    const shoulderMidX = (leftShoulder.x + rightShoulder.x) / 2;
+    const shoulderMidY = (leftShoulder.y + rightShoulder.y) / 2;
 
     return {
       leftShoulder,
@@ -335,13 +339,23 @@ export class Tracker {
       leftWrist: get(15),
       rightWrist: get(16),
       nose: get(0),
+
+      // Processed shoulder data for avatar
+      shoulderMidX,
+      shoulderMidY,
+      shoulderMidXNorm: shoulderMidX / w,
+      shoulderMidYNorm: shoulderMidY / h,
+      shoulderWidth,
+      shoulderWidthNorm: shoulderWidth / w,
+      shoulderTilt,
+
       synthesized: false,
     };
   }
 
-  _smooth(face) {
-    if (!this.prev) {
-      this.prev = { ...face };
+  _smoothFace(face) {
+    if (!this.prevFace) {
+      this.prevFace = { ...face };
       return face;
     }
 
@@ -349,22 +363,53 @@ export class Tracker {
     const lerp = (a, b) => a + (b - a) * alpha;
 
     const smoothed = {
-      x: lerp(this.prev.x, face.x),
-      y: lerp(this.prev.y, face.y),
-      xNorm: lerp(this.prev.xNorm, face.xNorm),
-      yNorm: lerp(this.prev.yNorm, face.yNorm),
-      eyeDistance: lerp(this.prev.eyeDistance, face.eyeDistance),
-      eyeDistanceNorm: lerp(this.prev.eyeDistanceNorm, face.eyeDistanceNorm),
-      faceX: lerp(this.prev.faceX ?? face.faceX, face.faceX),
-      faceY: lerp(this.prev.faceY ?? face.faceY, face.faceY),
-      yaw: lerp(this.prev.yaw, face.yaw),
-      pitch: lerp(this.prev.pitch, face.pitch),
-      roll: lerp(this.prev.roll, face.roll),
-      mouthOpen: lerp(this.prev.mouthOpen, face.mouthOpen),
+      x: lerp(this.prevFace.x, face.x),
+      y: lerp(this.prevFace.y, face.y),
+      xNorm: lerp(this.prevFace.xNorm, face.xNorm),
+      yNorm: lerp(this.prevFace.yNorm, face.yNorm),
+      eyeDistance: lerp(this.prevFace.eyeDistance, face.eyeDistance),
+      eyeDistanceNorm: lerp(this.prevFace.eyeDistanceNorm, face.eyeDistanceNorm),
+      yaw: lerp(this.prevFace.yaw, face.yaw),
+      pitch: lerp(this.prevFace.pitch, face.pitch),
+      roll: lerp(this.prevFace.roll, face.roll),
+      mouthOpen: lerp(this.prevFace.mouthOpen, face.mouthOpen),
       confidence: face.confidence,
     };
 
-    this.prev = smoothed;
+    this.prevFace = smoothed;
+    return smoothed;
+  }
+
+  _smoothBody(body) {
+    if (!this.prevBody) {
+      this.prevBody = { ...body };
+      return body;
+    }
+
+    // Faster alpha for body — less lag on shoulder movement
+    const alpha = 0.25 + (1 - this.smoothing) * 0.5;
+    const lerp = (a, b) => a + (b - a) * alpha;
+
+    const smoothed = {
+      ...body,
+      shoulderMidX: lerp(this.prevBody.shoulderMidX, body.shoulderMidX),
+      shoulderMidY: lerp(this.prevBody.shoulderMidY, body.shoulderMidY),
+      shoulderMidXNorm: lerp(this.prevBody.shoulderMidXNorm, body.shoulderMidXNorm),
+      shoulderMidYNorm: lerp(this.prevBody.shoulderMidYNorm, body.shoulderMidYNorm),
+      shoulderWidth: lerp(this.prevBody.shoulderWidth, body.shoulderWidth),
+      shoulderWidthNorm: lerp(this.prevBody.shoulderWidthNorm, body.shoulderWidthNorm),
+      shoulderTilt: lerp(this.prevBody.shoulderTilt, body.shoulderTilt),
+      leftShoulder: {
+        x: lerp(this.prevBody.leftShoulder.x, body.leftShoulder.x),
+        y: lerp(this.prevBody.leftShoulder.y, body.leftShoulder.y),
+      },
+      rightShoulder: {
+        x: lerp(this.prevBody.rightShoulder.x, body.rightShoulder.x),
+        y: lerp(this.prevBody.rightShoulder.y, body.rightShoulder.y),
+      },
+    };
+
+    this.prevBody = smoothed;
     return smoothed;
   }
 }

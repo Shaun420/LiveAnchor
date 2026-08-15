@@ -22,7 +22,7 @@ const stage = document.getElementById("stage");
 
 // State
 let tracker = null;
-let avatarController = null;  // <-- renamed
+let avatarController = null;
 let recorder = null;
 let stream = null;
 let running = false;
@@ -38,9 +38,12 @@ async function start() {
   startBtn.disabled = true;
 
   try {
-    // 1. Start camera FIRST so we know the real video dimensions
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
+      video: {
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        facingMode: "user",
+      },
       audio: false,
     });
 
@@ -52,25 +55,20 @@ async function start() {
     const h = webcam.videoHeight;
     console.log("[App] Camera resolution:", w, "x", h);
 
-    // 2. Size the overlay canvas to match the video
     overlayCanvas.width = w;
     overlayCanvas.height = h;
     bgCanvas.width = w;
     bgCanvas.height = h;
 
-    // 3. Initialize tracker
     tracker = new Tracker();
     await tracker.init();
 
-    // 4. Create the avatar controller AFTER canvas is sized
     avatarController = new AvatarController(overlayCanvas);
     avatarController.setSourceSize(w, h);
     avatarController.resize();
 
-    // Expose for console debugging
     window.avatar = avatarController;
 
-    // 5. Load VRM
     try {
       await avatarController.loadVRM("./models/avatar.vrm");
       console.log("[App] Default VRM loaded");
@@ -78,7 +76,6 @@ async function start() {
       console.warn("[App] No default VRM. Upload one via the panel.", e);
     }
 
-    // 6. Recorder
     recorder = new Recorder(stage);
 
     running = true;
@@ -119,31 +116,30 @@ function loop(now) {
   // FPS
   frameCount++;
   if (now - fpsTime > 500) {
-    fpsEl.textContent = `${Math.round(frameCount / ((now - fpsTime) / 1000))} FPS`;
+    fpsEl.textContent = `${Math.round(
+      frameCount / ((now - fpsTime) / 1000)
+    )} FPS`;
     frameCount = 0;
     fpsTime = now;
   }
 
-  // --- Tracking ---
+  // Tracking
   const data = tracker.process(webcam, now);
 
-  // --- Mirror toggle (visual only — do NOT flip tracking data) ---
+  // Mirror
   const mirrored = mirrorToggle.checked;
   const transform = mirrored
     ? "translate(-50%, -50%) scaleX(-1)"
     : "translate(-50%, -50%)";
   webcam.style.transform = transform;
   overlayCanvas.style.transform = transform;
-  // bgCanvas is hidden behind webcam, mirror it too if needed
   bgCanvas.style.transform = transform;
 
-  // --- Update avatar ---
-  // The avatar handles the X/Y mirroring internally
-  // based on the CSS mirror state we pass in (or just always mirror)
+  // Update avatar
   avatarController.update(data, dt);
   avatarController.render();
 
-  // --- Debug ---
+  // Debug
   if (data && data.face) {
     const f = data.face;
     const b = data.body;
@@ -161,11 +157,13 @@ function loop(now) {
         b.rightShoulder.y - b.leftShoulder.y
       ).toFixed(0);
       dbg += `\nshoulder: ${sw}px ${b.synthesized ? "(syn)" : "(real)"}`;
+      dbg += `\ntilt: ${((b.shoulderTilt || 0) * 57.3).toFixed(1)}°`;
+      dbg += `\nmid: ${b.shoulderMidX.toFixed(0)}, ${b.shoulderMidY.toFixed(0)}`;
     }
     debugEl.textContent = dbg;
   }
 
-  // --- Recording status ---
+  // Recording status
   if (recorder && recorder.recording) {
     recordStatus.textContent = recorder.getDuration();
   }

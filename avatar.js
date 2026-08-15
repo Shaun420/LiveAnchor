@@ -16,16 +16,13 @@ export class AvatarController {
     const width = canvas.clientWidth || 640;
     const height = canvas.clientHeight || 480;
     this.sizeMultiplier = 0.4;
-
-    // Positive = shift avatar UP relative to tracked eye position.
     this.verticalOffset = 0.05;
 
-    // Yaw compensation (used when shoulders aren't available)
+    // Yaw compensation (fallback when no shoulders)
     this.yawScaleCompensation = 0.9;
     this.minYawCos = 0.7;
 
-    // Scale blend: 0 = eyes only, 1 = shoulders only (when available)
-    // 0.7 means 70% shoulder, 30% eye — shoulder-dominant but smoothed by eyes
+    // Scale blend: 0 = eyes only, 1 = shoulders only
     this.shoulderScaleWeight = 0.7;
 
     this.camera = new THREE.PerspectiveCamera(30, width / height, 0.1, 100);
@@ -47,19 +44,18 @@ export class AvatarController {
     dir.position.set(1, 2, 3);
     this.scene.add(dir);
 
-    // anchorRoot is positioned/rotated/scaled by the tracker.
+    // anchorRoot: positioned at eye center, rotated by head rotation
     this.anchorRoot = new THREE.Group();
     this.anchorRoot.rotation.order = "YXZ";
     this.scene.add(this.anchorRoot);
 
-    // modelRoot offsets the VRM so its eye midpoint is at anchorRoot origin.
+    // modelRoot: offsets VRM so eyes are at anchorRoot origin
     this.modelRoot = new THREE.Group();
     this.anchorRoot.add(this.modelRoot);
 
-    // Keep `group` as an alias for compatibility.
     this.group = this.anchorRoot;
 
-    // --- Debug helpers ---
+    // Debug helpers
     const debugGeo = new THREE.BoxGeometry(0.1, 0.1, 0.1);
     const debugMat = new THREE.MeshBasicMaterial({
       color: 0xff0000,
@@ -84,28 +80,31 @@ export class AvatarController {
       roll: 0,
     };
 
-    // Avatar measurement ratios (computed from VRM model)
+    // Avatar measurements (computed from VRM)
     this.avatarEyeDistance = 0.065;
     this.avatarShoulderWidth = 0.3;
-
-    // Ratio: shoulderWidth / eyeDistance in the avatar model.
-    // Used to convert between the two scale references.
     this.avatarShoulderToEyeRatio = 4.6;
 
-    // Source frame size (video resolution).
+    // Distance from eye center to shoulder center in the avatar model.
+    // Computed during _configureModelAnchor.
+    this.avatarEyeToShoulderOffset = new THREE.Vector3(0, -0.17, 0);
+
+    // Source frame size
     this.sourceWidth = 1280;
     this.sourceHeight = 720;
 
-    // Smoothing speed (higher = faster).
+    // Smoothing speed
     this.response = 14;
+
+    // Body rotation bones (populated on VRM load)
+    this.spineBone = null;
+    this.chestBone = null;
+    this.upperChestBone = null;
 
     // Test mode
     this.testMode = "off";
   }
 
-  // -----------------------------------------------------------
-  // Source / Canvas size
-  // -----------------------------------------------------------
   setSourceSize(width, height) {
     this.sourceWidth = Math.max(1, width);
     this.sourceHeight = Math.max(1, height);
@@ -152,7 +151,7 @@ export class AvatarController {
       }
     });
 
-    // Reset transforms before configuring
+    // Reset transforms
     this.modelRoot.position.set(0, 0, 0);
     this.modelRoot.rotation.set(0, 0, 0);
     this.modelRoot.scale.setScalar(1);
@@ -163,6 +162,7 @@ export class AvatarController {
     this.modelRoot.add(vrm.scene);
 
     this._configureModelAnchor();
+    this._findBodyBones();
     this._logAvailableExpressions();
 
     console.log("[Avatar] VRM fully loaded & framed.");
@@ -170,12 +170,12 @@ export class AvatarController {
   }
 
   // -----------------------------------------------------------
-  // Configure anchor: eyes at origin + measure shoulders
+  // Configure anchor + measure everything
   // -----------------------------------------------------------
   _configureModelAnchor() {
     if (!this.vrm) return;
 
-    // Reset so world positions are clean
+    // Reset for clean measurement
     this.modelRoot.position.set(0, 0, 0);
     this.modelRoot.rotation.set(0, 0, 0);
     this.modelRoot.scale.setScalar(1);
@@ -218,13 +218,14 @@ export class AvatarController {
         center.z
       );
       avatarEyeDistance = size.y * 0.065;
-      console.warn("[Avatar] Eye bones not found, using bounding box estimate");
+      console.warn("[Avatar] No eye bones, using estimate");
     }
 
     // --- Shoulders ---
     const leftShoulderBone = humanoid?.getNormalizedBoneNode("leftUpperArm");
     const rightShoulderBone = humanoid?.getNormalizedBoneNode("rightUpperArm");
 
+    let shoulderCenterWorld;
     let avatarShoulderWidth;
 
     if (leftShoulderBone && rightShoulderBone) {
@@ -232,6 +233,7 @@ export class AvatarController {
       const rs = new THREE.Vector3();
       leftShoulderBone.getWorldPosition(ls);
       rightShoulderBone.getWorldPosition(rs);
+      shoulderCenterWorld = ls.clone().add(rs).multiplyScalar(0.5);
       avatarShoulderWidth = ls.distanceTo(rs);
       console.log(
         "[Avatar] Shoulder bones | L:",
@@ -242,21 +244,32 @@ export class AvatarController {
         avatarShoulderWidth.toFixed(4)
       );
     } else {
-      // Estimate: shoulders are typically ~4.5x eye distance
       avatarShoulderWidth = avatarEyeDistance * 4.5;
-      console.warn(
-        "[Avatar] Shoulder bones not found, estimating:",
-        avatarShoulderWidth.toFixed(4)
+      shoulderCenterWorld = new THREE.Vector3(
+        eyeCenterWorld.x,
+        eyeCenterWorld.y - avatarEyeDistance * 5,
+        eyeCenterWorld.z
       );
+      console.warn("[Avatar] No shoulder bones, estimating");
     }
 
-    // --- Compute ratio ---
+    // Eye-to-shoulder offset in model space
+    this.avatarEyeToShoulderOffset = shoulderCenterWorld
+      .clone()
+      .sub(eyeCenterWorld);
+
+    console.log(
+      "[Avatar] Eye→Shoulder offset:",
+      this.avatarEyeToShoulderOffset.toArray().map((v) => v.toFixed(4))
+    );
+
+    // --- Store measurements ---
     this.avatarEyeDistance = Math.max(avatarEyeDistance, 0.001);
     this.avatarShoulderWidth = Math.max(avatarShoulderWidth, 0.001);
     this.avatarShoulderToEyeRatio =
       this.avatarShoulderWidth / this.avatarEyeDistance;
 
-    // --- Move model so eye center is at local origin + offset ---
+    // --- Move model so eye center is at local origin ---
     const eyeCenterLocal = this.anchorRoot.worldToLocal(
       eyeCenterWorld.clone()
     );
@@ -270,11 +283,36 @@ export class AvatarController {
 
     console.log(
       "[Avatar] Anchor configured |",
-      "eyeDist:", this.avatarEyeDistance.toFixed(4),
-      "| shoulderW:", this.avatarShoulderWidth.toFixed(4),
-      "| ratio:", this.avatarShoulderToEyeRatio.toFixed(2),
-      "| yOffset:", yOffset.toFixed(4),
-      "| modelRoot.y:", this.modelRoot.position.y.toFixed(4)
+      "eyeDist:",
+      this.avatarEyeDistance.toFixed(4),
+      "| shoulderW:",
+      this.avatarShoulderWidth.toFixed(4),
+      "| ratio:",
+      this.avatarShoulderToEyeRatio.toFixed(2),
+      "| yOffset:",
+      yOffset.toFixed(4),
+      "| modelRoot.y:",
+      this.modelRoot.position.y.toFixed(4)
+    );
+  }
+
+  // -----------------------------------------------------------
+  // Find body bones for shoulder rotation
+  // -----------------------------------------------------------
+  _findBodyBones() {
+    if (!this.vrm?.humanoid) return;
+
+    const humanoid = this.vrm.humanoid;
+
+    this.spineBone = humanoid.getNormalizedBoneNode("spine");
+    this.chestBone = humanoid.getNormalizedBoneNode("chest");
+    this.upperChestBone = humanoid.getNormalizedBoneNode("upperChest");
+
+    console.log(
+      "[Avatar] Body bones |",
+      "spine:", !!this.spineBone,
+      "| chest:", !!this.chestBone,
+      "| upperChest:", !!this.upperChestBone
     );
   }
 
@@ -288,7 +326,7 @@ export class AvatarController {
   }
 
   // -----------------------------------------------------------
-  // Apply state to anchorRoot
+  // Apply state
   // -----------------------------------------------------------
   _applyState() {
     this.anchorRoot.position.set(this.state.x, this.state.y, 0);
@@ -301,6 +339,38 @@ export class AvatarController {
     );
 
     this.anchorMarker.position.set(this.state.x, this.state.y, 0);
+  }
+
+  // -----------------------------------------------------------
+  // Apply shoulder rotation to spine/chest bones
+  // -----------------------------------------------------------
+  _applyShoulderRotation(body, dt) {
+    if (!body || !this.vrm) return;
+
+    // Shoulder tilt → roll the upper body
+    const targetTilt = body.shoulderTilt || 0;
+
+    // Apply to the highest available body bone
+    // Split between spine and chest for more natural look
+    const bone = this.upperChestBone || this.chestBone || this.spineBone;
+    if (!bone) return;
+
+    // Smooth the bone rotation using the same response speed
+    const alpha = 1 - Math.exp(-this.response * Math.min(dt, 0.1));
+
+    // Roll (Z axis) — shoulder tilt
+    const currentZ = bone.rotation.z || 0;
+    bone.rotation.z = THREE.MathUtils.lerp(currentZ, -targetTilt, alpha);
+
+    // If we have separate bones, distribute the tilt
+    if (this.spineBone && this.spineBone !== bone) {
+      const spineZ = this.spineBone.rotation.z || 0;
+      this.spineBone.rotation.z = THREE.MathUtils.lerp(
+        spineZ,
+        -targetTilt * 0.3,
+        alpha
+      );
+    }
   }
 
   // -----------------------------------------------------------
@@ -362,6 +432,9 @@ export class AvatarController {
     }
 
     this._applyState();
+
+    // --- Shoulder rotation ---
+    this._applyShoulderRotation(body, dt);
 
     // --- Expressions ---
     if (this.vrm?.expressionManager) {
@@ -425,23 +498,15 @@ export class AvatarController {
 
     const plane = this._getVisiblePlaneSize();
 
-    // --- Position ---
+    // --- Position (from eye center) ---
     const x = (xNorm - 0.5) * plane.width;
     const y = (0.5 - yNorm) * plane.height;
 
     // --- Scale ---
-    // We have two measurements of distance:
-    //
-    // 1. Eye distance (affected by yaw — shrinks when head turns)
-    // 2. Shoulder distance (NOT affected by head yaw — stays constant)
-    //
-    // Shoulder width is the better distance proxy because it doesn't
-    // change when the person turns their head.
-
     let scaleFromEyes;
     let scaleFromShoulders = null;
 
-    // -- Eye-based scale (with yaw compensation as fallback) --
+    // Eye-based (yaw-compensated)
     const absYaw = Math.abs(face.yaw || 0);
     const yawCos = Math.max(this.minYawCos, Math.cos(absYaw));
     const correctedEyeNorm =
@@ -450,34 +515,28 @@ export class AvatarController {
       correctedEyeNorm * plane.width * this.sizeMultiplier;
     scaleFromEyes = desiredEyeWorld / this.avatarEyeDistance;
 
-    // -- Shoulder-based scale --
-    if (body && body.leftShoulder && body.rightShoulder) {
-      const shoulderDx = body.rightShoulder.x - body.leftShoulder.x;
-      const shoulderDy = body.rightShoulder.y - body.leftShoulder.y;
-      const shoulderPixels = Math.hypot(shoulderDx, shoulderDy);
-      const shoulderNorm = shoulderPixels / frameW;
+    // Shoulder-based
+    if (body && !body.synthesized && body.shoulderWidthNorm) {
+      const shoulderNorm = body.shoulderWidthNorm;
 
-      // Only trust shoulder measurement if it's reasonable
-      // (not too small = arms crossed, not too large = T-pose glitch)
-      const expectedShoulderNorm = eyeDistanceNorm * this.avatarShoulderToEyeRatio;
+      // Sanity check: shoulder width should be ~4-6x eye distance
+      const expectedShoulderNorm =
+        eyeDistanceNorm * this.avatarShoulderToEyeRatio;
       const ratio = shoulderNorm / (expectedShoulderNorm || 0.01);
 
-      // Accept if shoulder width is between 40% and 250% of expected
-      if (ratio > 0.4 && ratio < 2.5 && !body.synthesized) {
+      if (ratio > 0.4 && ratio < 2.5) {
         const desiredShoulderWorld =
           shoulderNorm * plane.width * this.sizeMultiplier;
         scaleFromShoulders = desiredShoulderWorld / this.avatarShoulderWidth;
       }
     }
 
-    // -- Blend --
+    // Blend
     let scale;
     if (scaleFromShoulders !== null) {
-      // Shoulders available: blend with eyes for smoothness
       const w = this.shoulderScaleWeight;
       scale = scaleFromShoulders * w + scaleFromEyes * (1 - w);
     } else {
-      // No shoulders: use yaw-compensated eyes
       scale = scaleFromEyes;
     }
 
@@ -511,9 +570,6 @@ export class AvatarController {
     });
   }
 
-  // -----------------------------------------------------------
-  // Render
-  // -----------------------------------------------------------
   render() {
     this.renderer.setClearColor(0x000000, 0);
     this.renderer.clear();
@@ -570,6 +626,12 @@ export class AvatarController {
       avatarEyeDistance: this.avatarEyeDistance,
       avatarShoulderWidth: this.avatarShoulderWidth,
       avatarShoulderToEyeRatio: this.avatarShoulderToEyeRatio,
+      eyeToShoulderOffset: this.avatarEyeToShoulderOffset.toArray(),
+      bodyBones: {
+        spine: !!this.spineBone,
+        chest: !!this.chestBone,
+        upperChest: !!this.upperChestBone,
+      },
       modelRoot_position: this.modelRoot.position.toArray(),
       verticalOffset: this.verticalOffset,
       modelVisible: this.vrm?.scene.visible,
