@@ -1,0 +1,39 @@
+// Face landmark indices (MediaPipe FaceLandmarker)
+export const FACE = {
+  NOSE: 1,
+  LEFT_EYE_OUTER: 33,
+  RIGHT_EYE_OUTER: 263,
+  CHIN: 152,
+  FOREHEAD: 10,
+  UPPER_LIP: 13,
+  LOWER_LIP: 14,
+  LEFT_EAR: 234,
+  RIGHT_EAR: 454,
+};
+
+// Pose landmark indices (MediaPipe PoseLandmarker)
+export const POSE = {
+  NOSE: 0,
+  LEFT_SHOULDER: 11,
+  RIGHT_SHOULDER: 12,
+  LEFT_ELBOW: 13,
+  RIGHT_ELBOW: 14,
+  LEFT_WRIST: 15,
+  RIGHT_WRIST: 16,
+  LEFT_PINKY: 17,
+  RIGHT_PINKY: 18,
+  LEFT_INDEX: 19,
+  RIGHT_INDEX: 20,
+  LEFT_THUMB: 21,
+  RIGHT_THUMB: 22,
+  LEFT_HIP: 23,
+  RIGHT_HIP: 24,
+  LEFT_KNEE: 25,
+  RIGHT_KNEE: 26,
+  LEFT_ANKLE: 27,
+  RIGHT_ANKLE: 28,
+  LEFT_HEEL: 29,
+  RIGHT_HEEL: 30,
+  LEFT_FOOT_INDEX: 31,
+  RIGHT_FOOT_INDEX: 32,
+};

@@ -1,5 +1,5 @@
-import { Tracker } from "./tracker.js";
-import { AvatarController } from "./avatar.js";
+import { Tracker } from "./tracker/index.js";
+import { AvatarController } from "./avatar/index.js";
 import { Recorder } from "./recorder.js";
 
 const $ = (id) => document.getElementById(id);
@@ -100,11 +100,12 @@ function loop(now) {
     const f = data.face, b = data.body;
     let d = "";
     if (f) {
-      d += `face:${f.x.toFixed(0)},${f.y.toFixed(0)} yaw:${(f.yaw*57.3).toFixed(1)}° pitch:${(f.pitch*57.3).toFixed(1)}° roll:${(f.roll*57.3).toFixed(1)}°\n`;
+      d += `face:${f.x.toFixed(0)},${f.y.toFixed(0)} `;
+      d += `yaw:${(f.yaw*57.3).toFixed(1)}° pitch:${(f.pitch*57.3).toFixed(1)}° roll:${(f.roll*57.3).toFixed(1)}°\n`;
       d += `eye:${f.eyeDistance.toFixed(0)}px mouth:${f.mouthOpen.toFixed(2)}\n`;
     }
     if (b) {
-      d += `---body--- ${b.worldSpace?"3D":"2D"} ${b.synthesized?"(syn)":"(real)"}\n`;
+      d += `--- body ${b.worldSpace?"3D":"2D"} ${b.synthesized?"syn":"real"} ---\n`;
       d += `sh:${b.shoulderWidth.toFixed(0)}px tilt:${((b.shoulderTilt||0)*57.3).toFixed(1)}°\n`;
       if (b.torso) d += `torso Y:${(b.torso.yaw*57.3).toFixed(1)}° P:${(b.torso.pitch*57.3).toFixed(1)}° R:${(b.torso.roll*57.3).toFixed(1)}°\n`;
       if (b.rotations) d += `elbows L:${(b.rotations.leftElbowAngle*57.3).toFixed(0)}° R:${(b.rotations.rightElbowAngle*57.3).toFixed(0)}°\n`;
@@ -127,14 +128,24 @@ vrmInput.addEventListener("change", async (e) => {
   if (f && avatar) await avatar.loadVRM(URL.createObjectURL(f));
 });
 calibrateBtn.addEventListener("click", () => {
-  if (tracker) { tracker.calibrate(); calibrateBtn.textContent = "✓"; setTimeout(() => (calibrateBtn.textContent = "Calibrate Neutral"), 1500); }
+  if (tracker) {
+    tracker.calibrate();
+    calibrateBtn.textContent = "✓";
+    setTimeout(() => (calibrateBtn.textContent = "Calibrate Neutral"), 1500);
+  }
 });
 recordBtn.addEventListener("click", () => {
   if (!recorder) return;
   if (recorder.recording) {
-    recorder.stop(); recordBtn.textContent = "● Record"; recordBtn.classList.remove("active"); recordStatus.textContent = "Saved!";
+    recorder.stop();
+    recordBtn.textContent = "● Record";
+    recordBtn.classList.remove("active");
+    recordStatus.textContent = "Saved!";
   } else {
-    recorder.start(); recordBtn.textContent = "■ Stop"; recordBtn.classList.add("active"); recordStatus.textContent = "0:00";
+    recorder.start();
+    recordBtn.textContent = "■ Stop";
+    recordBtn.classList.add("active");
+    recordStatus.textContent = "0:00";
   }
 });
 window.addEventListener("resize", () => avatar?.resize());
