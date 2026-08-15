@@ -16,7 +16,6 @@ const IDX = {
   RIGHT_EAR: 454,
 };
 
-// MediaPipe Pose landmark indices
 const POSE = {
   NOSE: 0,
   LEFT_SHOULDER: 11,
@@ -55,8 +54,15 @@ export class Tracker {
     this.enableBg = false;
     this.smoothing = 0.5;
 
+    // Visibility threshold — lowered because some backends
+    // report low or zero visibility even when landmarks are valid
+    this.visibilityThreshold = 0.3;
+
     this.prevFace = null;
     this.prevBody = null;
+
+    // One-time diagnostics
+    this._loggedRawPose = false;
   }
 
   async init() {
@@ -87,6 +93,7 @@ export class Tracker {
     });
 
     this.ready = true;
+    console.log("[Tracker] Initialized | face + pose");
   }
 
   calibrate(anchor) {
@@ -144,6 +151,12 @@ export class Tracker {
             ? poseResults.worldLandmarks[0]
             : null;
 
+        // One-time raw dump to diagnose visibility
+        if (!this._loggedRawPose) {
+          this._loggedRawPose = true;
+          this._logRawPoseLandmarks(poseLandmarks, poseWorldLandmarks);
+        }
+
         result.body = this._extractFullBody(
           poseLandmarks,
           poseWorldLandmarks,
@@ -165,7 +178,56 @@ export class Tracker {
   }
 
   // -------------------------------------------------------
-  // Face extraction (unchanged from before)
+  // One-time raw pose landmark dump
+  // -------------------------------------------------------
+  _logRawPoseLandmarks(poseLandmarks, poseWorldLandmarks) {
+    console.log("========== RAW POSE LANDMARKS ==========");
+    console.log("Total landmarks:", poseLandmarks.length);
+    console.log("Has world landmarks:", !!poseWorldLandmarks);
+
+    const keyIndices = {
+      NOSE: 0,
+      L_SHOULDER: 11,
+      R_SHOULDER: 12,
+      L_ELBOW: 13,
+      R_ELBOW: 14,
+      L_WRIST: 15,
+      R_WRIST: 16,
+      L_HIP: 23,
+      R_HIP: 24,
+      L_KNEE: 25,
+      R_KNEE: 26,
+      L_ANKLE: 27,
+      R_ANKLE: 28,
+    };
+
+    console.log("\n--- Normalized landmarks (key joints) ---");
+    for (const [name, idx] of Object.entries(keyIndices)) {
+      const lm = poseLandmarks[idx];
+      console.log(
+        `${name}[${idx}]: x:${lm.x?.toFixed(4)} y:${lm.y?.toFixed(4)} z:${lm.z?.toFixed(4)}`,
+        `visibility:${lm.visibility} presence:${lm.presence}`,
+        `keys:[${Object.keys(lm).join(",")}]`
+      );
+    }
+
+    if (poseWorldLandmarks) {
+      console.log("\n--- World landmarks (key joints) ---");
+      for (const [name, idx] of Object.entries(keyIndices)) {
+        const lm = poseWorldLandmarks[idx];
+        console.log(
+          `${name}[${idx}]: x:${lm.x?.toFixed(4)} y:${lm.y?.toFixed(4)} z:${lm.z?.toFixed(4)}`,
+          `visibility:${lm.visibility} presence:${lm.presence}`,
+          `keys:[${Object.keys(lm).join(",")}]`
+        );
+      }
+    }
+
+    console.log("==========================================");
+  }
+
+  // -------------------------------------------------------
+  // Face extraction
   // -------------------------------------------------------
   _get2D(landmarks, idx, w, h) {
     const lm = landmarks[idx];
@@ -266,28 +328,39 @@ export class Tracker {
   }
 
   // -------------------------------------------------------
-  // Full body extraction with joint rotations
+  // Full body extraction — fixed visibility
   // -------------------------------------------------------
   _extractFullBody(poseLandmarks, poseWorldLandmarks, video, face) {
     const w = video.videoWidth;
     const h = video.videoHeight;
 
-    // 2D positions (for screen overlay / positioning)
-    const get2d = (idx) => ({
-      x: poseLandmarks[idx].x * w,
-      y: poseLandmarks[idx].y * h,
-      visibility: poseLandmarks[idx].visibility || 0,
-    });
+    // Get visibility robustly: try .visibility, then .presence, default to 1.0
+    const getVis = (lm) => {
+      if (typeof lm.visibility === "number") return lm.visibility;
+      if (typeof lm.presence === "number") return lm.presence;
+      return 1.0; // Assume visible if no visibility data
+    };
 
-    // 3D world positions (for rotation computation)
-    // These are in meters, centered around the hip
+    const get2d = (idx) => {
+      const lm = poseLandmarks[idx];
+      return {
+        x: lm.x * w,
+        y: lm.y * h,
+        visibility: getVis(lm),
+      };
+    };
+
+    const useWorld = !!poseWorldLandmarks;
     const get3d = (idx) => {
-      if (!poseWorldLandmarks) return { x: 0, y: 0, z: 0 };
-      const lm = poseWorldLandmarks[idx];
+      if (useWorld) {
+        const lm = poseWorldLandmarks[idx];
+        return { x: lm.x, y: lm.y, z: lm.z };
+      }
+      const lm = poseLandmarks[idx];
       return { x: lm.x, y: lm.y, z: lm.z };
     };
 
-    // --- 2D landmarks ---
+    // --- 2D ---
     const joints2d = {
       nose: get2d(POSE.NOSE),
       leftShoulder: get2d(POSE.LEFT_SHOULDER),
@@ -306,7 +379,7 @@ export class Tracker {
       rightIndex: get2d(POSE.RIGHT_INDEX),
     };
 
-    // --- 3D world landmarks ---
+    // --- 3D ---
     const joints3d = {
       nose: get3d(POSE.NOSE),
       leftShoulder: get3d(POSE.LEFT_SHOULDER),
@@ -323,7 +396,7 @@ export class Tracker {
       rightAnkle: get3d(POSE.RIGHT_ANKLE),
     };
 
-    // --- Shoulder metrics (2D) ---
+    // --- Shoulder metrics ---
     const ls = joints2d.leftShoulder;
     const rs = joints2d.rightShoulder;
     const dx = ls.x - rs.x;
@@ -333,7 +406,7 @@ export class Tracker {
     const shoulderMidX = (ls.x + rs.x) / 2;
     const shoulderMidY = (ls.y + rs.y) / 2;
 
-    // --- Hip metrics (2D) ---
+    // --- Hip metrics ---
     const lh = joints2d.leftHip;
     const rh = joints2d.rightHip;
     const hipMidX = (lh.x + rh.x) / 2;
@@ -342,45 +415,43 @@ export class Tracker {
     const hipDy = lh.y - rh.y;
     const hipTilt = Math.atan2(hipDy, hipDx);
 
-    // --- Compute joint ROTATIONS from 3D world landmarks ---
+    // --- Joint rotations ---
     const rotations = this._computeJointRotations(joints3d);
 
-    // --- Torso rotation from 3D ---
+    // --- Torso ---
     const torso = this._computeTorsoRotation(joints3d);
 
-    // --- Visibility check ---
-    const minVis = 0.5;
-    const hasShoulders =
-      ls.visibility > minVis && rs.visibility > minVis;
-    const hasHips =
-      lh.visibility > minVis && rh.visibility > minVis;
+    // --- Visibility check with lowered threshold ---
+    const minVis = this.visibilityThreshold;
+    const hasShoulders = ls.visibility > minVis && rs.visibility > minVis;
+    const hasHips = lh.visibility > minVis && rh.visibility > minVis;
+
+    // For arms: check shoulder + elbow + wrist
     const hasLeftArm =
+      ls.visibility > minVis &&
       joints2d.leftElbow.visibility > minVis &&
       joints2d.leftWrist.visibility > minVis;
     const hasRightArm =
+      rs.visibility > minVis &&
       joints2d.rightElbow.visibility > minVis &&
       joints2d.rightWrist.visibility > minVis;
+
+    // For legs: check hip + knee + ankle
     const hasLeftLeg =
+      lh.visibility > minVis &&
       joints2d.leftKnee.visibility > minVis &&
       joints2d.leftAnkle.visibility > minVis;
     const hasRightLeg =
+      rh.visibility > minVis &&
       joints2d.rightKnee.visibility > minVis &&
       joints2d.rightAnkle.visibility > minVis;
 
     return {
-      // 2D positions
       joints2d,
-
-      // 3D world positions
       joints3d,
-
-      // Computed rotations for each limb
       rotations,
-
-      // Torso orientation
       torso,
 
-      // Shoulder data (for positioning & scale)
       leftShoulder: ls,
       rightShoulder: rs,
       shoulderMidX,
@@ -391,12 +462,10 @@ export class Tracker {
       shoulderWidthNorm: shoulderWidth / w,
       shoulderTilt,
 
-      // Hip data
       hipMidX,
       hipMidY,
       hipTilt,
 
-      // Visibility flags
       hasShoulders,
       hasHips,
       hasLeftArm,
@@ -404,19 +473,13 @@ export class Tracker {
       hasLeftLeg,
       hasRightLeg,
 
+      worldSpace: useWorld,
       synthesized: false,
     };
   }
 
-  // -------------------------------------------------------
-  // Compute rotation angles between connected limbs
-  //
-  // These are angles in 3D space between parent→joint
-  // and joint→child segments
-  // -------------------------------------------------------
   _computeJointRotations(j) {
     const angle3d = (a, b, c) => {
-      // Angle at point b, between segments ba and bc
       const ba = { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z };
       const bc = { x: c.x - b.x, y: c.y - b.y, z: c.z - b.z };
       const dot = ba.x * bc.x + ba.y * bc.y + ba.z * bc.z;
@@ -425,64 +488,41 @@ export class Tracker {
       return Math.acos(Math.max(-1, Math.min(1, dot / (magBA * magBC))));
     };
 
-    // Direction vector from a to b
     const dir = (a, b) => ({
       x: b.x - a.x,
       y: b.y - a.y,
       z: b.z - a.z,
     });
 
-    // Compute limb directions for IK-style rotation
-    const leftUpperArmDir = dir(j.leftShoulder, j.leftElbow);
-    const leftLowerArmDir = dir(j.leftElbow, j.leftWrist);
-    const rightUpperArmDir = dir(j.rightShoulder, j.rightElbow);
-    const rightLowerArmDir = dir(j.rightElbow, j.rightWrist);
-
-    const leftUpperLegDir = dir(j.leftHip, j.leftKnee);
-    const leftLowerLegDir = dir(j.leftKnee, j.leftAnkle);
-    const rightUpperLegDir = dir(j.rightHip, j.rightKnee);
-    const rightLowerLegDir = dir(j.rightKnee, j.rightAnkle);
-
     return {
-      // Arm bend angles (0 = straight, π = fully bent)
       leftElbowAngle: angle3d(j.leftShoulder, j.leftElbow, j.leftWrist),
       rightElbowAngle: angle3d(j.rightShoulder, j.rightElbow, j.rightWrist),
-
-      // Leg bend angles
       leftKneeAngle: angle3d(j.leftHip, j.leftKnee, j.leftAnkle),
       rightKneeAngle: angle3d(j.rightHip, j.rightKnee, j.rightAnkle),
 
-      // Limb direction vectors (for full IK)
-      leftUpperArmDir,
-      leftLowerArmDir,
-      rightUpperArmDir,
-      rightLowerArmDir,
-      leftUpperLegDir,
-      leftLowerLegDir,
-      rightUpperLegDir,
-      rightLowerLegDir,
+      leftUpperArmDir: dir(j.leftShoulder, j.leftElbow),
+      leftLowerArmDir: dir(j.leftElbow, j.leftWrist),
+      rightUpperArmDir: dir(j.rightShoulder, j.rightElbow),
+      rightLowerArmDir: dir(j.rightElbow, j.rightWrist),
+      leftUpperLegDir: dir(j.leftHip, j.leftKnee),
+      leftLowerLegDir: dir(j.leftKnee, j.leftAnkle),
+      rightUpperLegDir: dir(j.rightHip, j.rightKnee),
+      rightLowerLegDir: dir(j.rightKnee, j.rightAnkle),
     };
   }
 
-  // -------------------------------------------------------
-  // Compute torso orientation from hips + shoulders
-  // -------------------------------------------------------
   _computeTorsoRotation(j) {
-    // Shoulder midpoint
     const sMid = {
       x: (j.leftShoulder.x + j.rightShoulder.x) / 2,
       y: (j.leftShoulder.y + j.rightShoulder.y) / 2,
       z: (j.leftShoulder.z + j.rightShoulder.z) / 2,
     };
-
-    // Hip midpoint
     const hMid = {
       x: (j.leftHip.x + j.rightHip.x) / 2,
       y: (j.leftHip.y + j.rightHip.y) / 2,
       z: (j.leftHip.z + j.rightHip.z) / 2,
     };
 
-    // Spine direction: hip → shoulder (up vector of torso)
     const spineDir = {
       x: sMid.x - hMid.x,
       y: sMid.y - hMid.y,
@@ -493,36 +533,20 @@ export class Tracker {
     spineDir.y /= spineLen;
     spineDir.z /= spineLen;
 
-    // Shoulder lateral: right → left (in MediaPipe world coords, X is right)
     const shoulderLateral = {
       x: j.leftShoulder.x - j.rightShoulder.x,
       y: j.leftShoulder.y - j.rightShoulder.y,
       z: j.leftShoulder.z - j.rightShoulder.z,
     };
-    const latLen = Math.hypot(
-      shoulderLateral.x,
-      shoulderLateral.y,
-      shoulderLateral.z
-    ) || 1;
+    const latLen =
+      Math.hypot(shoulderLateral.x, shoulderLateral.y, shoulderLateral.z) || 1;
     shoulderLateral.x /= latLen;
     shoulderLateral.y /= latLen;
     shoulderLateral.z /= latLen;
 
-    // Torso yaw: rotation around vertical axis
-    // Use the shoulder lateral's X/Z to determine facing direction
     const torsoYaw = Math.atan2(shoulderLateral.z, shoulderLateral.x);
-
-    // Torso pitch: forward/backward lean
-    // spineDir.z > 0 means leaning forward
-    const torsoPitch = Math.asin(
-      Math.max(-1, Math.min(1, spineDir.z))
-    );
-
-    // Torso roll: side-to-side lean
-    // spineDir.x > 0 means leaning to the right
-    const torsoRoll = Math.asin(
-      Math.max(-1, Math.min(1, -spineDir.x))
-    );
+    const torsoPitch = Math.asin(Math.max(-1, Math.min(1, spineDir.z)));
+    const torsoRoll = Math.asin(Math.max(-1, Math.min(1, -spineDir.x)));
 
     return {
       yaw: torsoYaw,
@@ -551,10 +575,7 @@ export class Tracker {
       xNorm: lerp(this.prevFace.xNorm, face.xNorm),
       yNorm: lerp(this.prevFace.yNorm, face.yNorm),
       eyeDistance: lerp(this.prevFace.eyeDistance, face.eyeDistance),
-      eyeDistanceNorm: lerp(
-        this.prevFace.eyeDistanceNorm,
-        face.eyeDistanceNorm
-      ),
+      eyeDistanceNorm: lerp(this.prevFace.eyeDistanceNorm, face.eyeDistanceNorm),
       yaw: lerp(this.prevFace.yaw, face.yaw),
       pitch: lerp(this.prevFace.pitch, face.pitch),
       roll: lerp(this.prevFace.roll, face.roll),
@@ -574,10 +595,8 @@ export class Tracker {
 
     const alpha = 0.25 + (1 - this.smoothing) * 0.5;
     const lerp = (a, b) => a + (b - a) * alpha;
-
     const prev = this.prevBody;
 
-    // Smooth key metrics
     const smoothed = {
       ...body,
       shoulderMidX: lerp(prev.shoulderMidX, body.shoulderMidX),
@@ -590,7 +609,6 @@ export class Tracker {
       hipTilt: lerp(prev.hipTilt || 0, body.hipTilt || 0),
     };
 
-    // Smooth torso rotation
     if (body.torso && prev.torso) {
       smoothed.torso = {
         ...body.torso,
@@ -600,29 +618,7 @@ export class Tracker {
       };
     }
 
-    // Smooth joint rotations
     if (body.rotations && prev.rotations) {
-      smoothed.rotations = {
-        ...body.rotations,
-        leftElbowAngle: lerp(
-          prev.rotations.leftElbowAngle,
-          body.rotations.leftElbowAngle
-        ),
-        rightElbowAngle: lerp(
-          prev.rotations.rightElbowAngle,
-          body.rotations.rightElbowAngle
-        ),
-        leftKneeAngle: lerp(
-          prev.rotations.leftKneeAngle,
-          body.rotations.leftKneeAngle
-        ),
-        rightKneeAngle: lerp(
-          prev.rotations.rightKneeAngle,
-          body.rotations.rightKneeAngle
-        ),
-      };
-
-      // Smooth direction vectors
       const smoothDir = (prevDir, newDir) => {
         if (!prevDir || !newDir) return newDir;
         return {
@@ -632,38 +628,21 @@ export class Tracker {
         };
       };
 
-      smoothed.rotations.leftUpperArmDir = smoothDir(
-        prev.rotations.leftUpperArmDir,
-        body.rotations.leftUpperArmDir
-      );
-      smoothed.rotations.leftLowerArmDir = smoothDir(
-        prev.rotations.leftLowerArmDir,
-        body.rotations.leftLowerArmDir
-      );
-      smoothed.rotations.rightUpperArmDir = smoothDir(
-        prev.rotations.rightUpperArmDir,
-        body.rotations.rightUpperArmDir
-      );
-      smoothed.rotations.rightLowerArmDir = smoothDir(
-        prev.rotations.rightLowerArmDir,
-        body.rotations.rightLowerArmDir
-      );
-      smoothed.rotations.leftUpperLegDir = smoothDir(
-        prev.rotations.leftUpperLegDir,
-        body.rotations.leftUpperLegDir
-      );
-      smoothed.rotations.leftLowerLegDir = smoothDir(
-        prev.rotations.leftLowerLegDir,
-        body.rotations.leftLowerLegDir
-      );
-      smoothed.rotations.rightUpperLegDir = smoothDir(
-        prev.rotations.rightUpperLegDir,
-        body.rotations.rightUpperLegDir
-      );
-      smoothed.rotations.rightLowerLegDir = smoothDir(
-        prev.rotations.rightLowerLegDir,
-        body.rotations.rightLowerLegDir
-      );
+      smoothed.rotations = {
+        ...body.rotations,
+        leftElbowAngle: lerp(prev.rotations.leftElbowAngle, body.rotations.leftElbowAngle),
+        rightElbowAngle: lerp(prev.rotations.rightElbowAngle, body.rotations.rightElbowAngle),
+        leftKneeAngle: lerp(prev.rotations.leftKneeAngle, body.rotations.leftKneeAngle),
+        rightKneeAngle: lerp(prev.rotations.rightKneeAngle, body.rotations.rightKneeAngle),
+        leftUpperArmDir: smoothDir(prev.rotations.leftUpperArmDir, body.rotations.leftUpperArmDir),
+        leftLowerArmDir: smoothDir(prev.rotations.leftLowerArmDir, body.rotations.leftLowerArmDir),
+        rightUpperArmDir: smoothDir(prev.rotations.rightUpperArmDir, body.rotations.rightUpperArmDir),
+        rightLowerArmDir: smoothDir(prev.rotations.rightLowerArmDir, body.rotations.rightLowerArmDir),
+        leftUpperLegDir: smoothDir(prev.rotations.leftUpperLegDir, body.rotations.leftUpperLegDir),
+        leftLowerLegDir: smoothDir(prev.rotations.leftLowerLegDir, body.rotations.leftLowerLegDir),
+        rightUpperLegDir: smoothDir(prev.rotations.rightUpperLegDir, body.rotations.rightUpperLegDir),
+        rightLowerLegDir: smoothDir(prev.rotations.rightLowerLegDir, body.rotations.rightLowerLegDir),
+      };
     }
 
     this.prevBody = this._cloneBodyForSmoothing(smoothed);
