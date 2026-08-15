@@ -146,7 +146,8 @@ function loop(now) {
   // --- Debug ---
   if (data && data.face) {
     const f = data.face;
-    debugEl.textContent =
+    const b = data.body;
+    let dbg =
       `pos: ${f.x.toFixed(0)}, ${f.y.toFixed(0)}\n` +
       `norm: ${(f.xNorm || 0).toFixed(2)}, ${(f.yNorm || 0).toFixed(2)}\n` +
       `yaw: ${(f.yaw * 57.3).toFixed(1)}°\n` +
@@ -154,6 +155,14 @@ function loop(now) {
       `roll: ${(f.roll * 57.3).toFixed(1)}°\n` +
       `eye: ${f.eyeDistance.toFixed(0)}px\n` +
       `mouth: ${f.mouthOpen.toFixed(2)}`;
+    if (b) {
+      const sw = Math.hypot(
+        b.rightShoulder.x - b.leftShoulder.x,
+        b.rightShoulder.y - b.leftShoulder.y
+      ).toFixed(0);
+      dbg += `\nshoulder: ${sw}px ${b.synthesized ? "(syn)" : "(real)"}`;
+    }
+    debugEl.textContent = dbg;
   }
 
   // --- Recording status ---
