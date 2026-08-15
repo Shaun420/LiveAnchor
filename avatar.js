@@ -15,6 +15,12 @@ export class AvatarController {
 
     const width = canvas.clientWidth || 640;
     const height = canvas.clientHeight || 480;
+    this.sizeMultiplier = 0.4;
+
+    // Positive = shift avatar UP relative to tracked eye position.
+    // Compensates for eye bone vs visible eye center discrepancy.
+    // Adjust via: window.avatar.verticalOffset = 0.05; window.avatar._configureModelAnchor();
+    this.verticalOffset = 0.0;
 
     this.camera = new THREE.PerspectiveCamera(30, width / height, 0.1, 100);
     this.camera.position.set(0, 0, 2);
@@ -40,7 +46,7 @@ export class AvatarController {
     this.anchorRoot.rotation.order = "YXZ";
     this.scene.add(this.anchorRoot);
 
-    // modelRoot offsets the VRM so its eye midpoint is at local (0, 0, 0).
+    // modelRoot offsets the VRM so its eye midpoint is at anchorRoot origin.
     this.modelRoot = new THREE.Group();
     this.anchorRoot.add(this.modelRoot);
 
@@ -79,6 +85,9 @@ export class AvatarController {
     // Source frame size (video resolution).
     this.sourceWidth = 1280;
     this.sourceHeight = 720;
+
+    this.yawScaleCompensation = 1; // 0 = off, 1 = full correction
+    this.minYawCos = 0.7;            // prevents overcorrection at extreme angles
 
     // Smoothing speed (higher = faster).
     this.response = 14;
@@ -139,7 +148,7 @@ export class AvatarController {
       }
     });
 
-    // Reset transforms
+    // Reset transforms before configuring anchor
     this.modelRoot.position.set(0, 0, 0);
     this.modelRoot.rotation.set(0, 0, 0);
     this.modelRoot.scale.setScalar(1);
@@ -160,13 +169,24 @@ export class AvatarController {
   }
 
   // -----------------------------------------------------------
-  // Configure anchor: move the model so its eyes are at origin
+  // Configure anchor: move the model so its eyes are at anchorRoot origin.
+  //
+  // IMPORTANT: This method is IDEMPOTENT — calling it multiple times
+  // gives the same result. It always resets modelRoot.position to (0,0,0)
+  // before computing the eye offset, so the yOffset never accumulates.
   // -----------------------------------------------------------
   _configureModelAnchor() {
     if (!this.vrm) return;
 
+    // Step 1: Reset modelRoot so world positions are computed from a clean state.
+    // Without this, repeated calls would shift the model further each time
+    // because worldToLocal depends on the current modelRoot position.
+    this.modelRoot.position.set(0, 0, 0);
+    this.modelRoot.rotation.set(0, 0, 0);
+    this.modelRoot.scale.setScalar(1);
     this.scene.updateMatrixWorld(true);
 
+    // Step 2: Find eye positions in world space
     const box = new THREE.Box3().setFromObject(this.vrm.scene);
     const size = new THREE.Vector3();
     const center = new THREE.Vector3();
@@ -174,49 +194,65 @@ export class AvatarController {
     box.getCenter(center);
 
     const humanoid = this.vrm.humanoid;
-    const leftEye = humanoid?.getNormalizedBoneNode("leftEye");
-    const rightEye = humanoid?.getNormalizedBoneNode("rightEye");
+    const leftEyeBone = humanoid?.getNormalizedBoneNode("leftEye");
+    const rightEyeBone = humanoid?.getNormalizedBoneNode("rightEye");
 
     let eyeCenterWorld;
     let avatarEyeDistance;
 
-    if (leftEye && rightEye) {
+    if (leftEyeBone && rightEyeBone) {
       const lp = new THREE.Vector3();
       const rp = new THREE.Vector3();
-      leftEye.getWorldPosition(lp);
-      rightEye.getWorldPosition(rp);
+      leftEyeBone.getWorldPosition(lp);
+      rightEyeBone.getWorldPosition(rp);
       eyeCenterWorld = lp.clone().add(rp).multiplyScalar(0.5);
       avatarEyeDistance = lp.distanceTo(rp);
-      console.log("[Avatar] Using eye bones as anchor");
+
+      console.log(
+        "[Avatar] Eye bones found | L:", lp.toArray().map(v => v.toFixed(4)),
+        "| R:", rp.toArray().map(v => v.toFixed(4)),
+        "| center:", eyeCenterWorld.toArray().map(v => v.toFixed(4))
+      );
     } else {
-      // Fallback: use top-center of bounding box.
+      // Fallback: estimate from bounding box (top 12% = approximate eye level)
       eyeCenterWorld = new THREE.Vector3(
         center.x,
         box.max.y - size.y * 0.12,
         center.z
       );
       avatarEyeDistance = size.y * 0.065;
-      console.warn(
-        "[Avatar] No eye bones found; using estimated eye position."
-      );
+      console.warn("[Avatar] Eye bones not found, using bounding box estimate");
     }
 
-    const eyeCenterLocal = this.anchorRoot.worldToLocal(
-      eyeCenterWorld.clone()
+    // Step 3: Convert eye center from world space to anchorRoot local space.
+    // anchorRoot.position is (0,0,0) at this point, so local === world here,
+    // but we use worldToLocal for correctness in case that changes.
+    const eyeCenterLocal = this.anchorRoot.worldToLocal(eyeCenterWorld.clone());
+
+    // Step 4: Shift modelRoot so the eye center lands at local (0, verticalOffset, 0).
+    // We use .set() not += so this is always absolute, never cumulative.
+    //
+    //   modelRoot.position = -eyeCenterLocal + (0, verticalOffset, 0)
+    //
+    // Result: when anchorRoot moves to the tracked eye position,
+    // the avatar's visible eyes appear at that position (plus the small offset).
+    const yOffset = this.verticalOffset ?? 0.05;
+
+    this.modelRoot.position.set(
+      -eyeCenterLocal.x,
+      -eyeCenterLocal.y + yOffset,
+      -eyeCenterLocal.z
     );
-    this.modelRoot.position.copy(eyeCenterLocal).multiplyScalar(-1);
 
     this.avatarEyeDistance = Math.max(avatarEyeDistance, 0.001);
 
-    this.scene.updateMatrixWorld(true);
-
-    console.log("[Avatar] Model dimensions:", {
-      width: size.x,
-      height: size.y,
-      depth: size.z,
-      avatarEyeDistance: this.avatarEyeDistance,
-      modelOffset: this.modelRoot.position.toArray(),
-    });
+    console.log(
+      "[Avatar] Anchor configured |",
+      "eyeLocal:", eyeCenterLocal.toArray().map(v => v.toFixed(4)),
+      "| yOffset:", yOffset.toFixed(4),
+      "| modelRoot.position:", this.modelRoot.position.toArray().map(v => v.toFixed(4)),
+      "| avatarEyeDistance:", this.avatarEyeDistance.toFixed(4)
+    );
   }
 
   _logAvailableExpressions() {
@@ -290,12 +326,16 @@ export class AvatarController {
         target.pitch,
         alpha
       );
-      this.state.roll = THREE.MathUtils.lerp(this.state.roll, target.roll, alpha);
+      this.state.roll = THREE.MathUtils.lerp(
+        this.state.roll,
+        target.roll,
+        alpha
+      );
     }
 
     this._applyState();
 
-    // --- Expressions (inlined) ---
+    // --- Expressions ---
     if (this.vrm?.expressionManager) {
       const em = this.vrm.expressionManager;
       const { blendshapes } = trackingData || {};
@@ -324,7 +364,7 @@ export class AvatarController {
         setExpr("blinkLeft", blendshapes.eyeBlinkLeft || 0);
         setExpr("blinkRight", blendshapes.eyeBlinkRight || 0);
       } else if (face) {
-        setExpr("aa", Math.min(1, face.mouthOpen * 5));
+        setExpr("aa", Math.min(1, (face.mouthOpen || 0) * 5));
       }
     }
 
@@ -334,7 +374,7 @@ export class AvatarController {
   }
 
   // -----------------------------------------------------------
-  // Convert tracked face to anchor target (FIXED)
+  // Convert tracked face to anchor target
   // -----------------------------------------------------------
   _getVisiblePlaneSize() {
     const distance = Math.abs(this.camera.position.z);
@@ -357,14 +397,22 @@ export class AvatarController {
 
     const plane = this._getVisiblePlaneSize();
 
-    // MediaPipe X is in the unmirrored frame.
-    // The canvas is mirrored with CSS, so we flip X to match.
-    const x = (0.5 - xNorm) * plane.width;
-
-    // Image Y goes down, Three.js Y goes up
+    // Position
+    const x = (xNorm - 0.5) * plane.width;
     const y = (0.5 - yNorm) * plane.height;
 
-    const desiredEyeDistanceWorld = eyeDistanceNorm * plane.width;
+    // --- Yaw compensation for scale ---
+    // As the head turns sideways, 2D eye distance shrinks by ~cos(yaw),
+    // which makes the avatar look farther away unless we compensate.
+    const absYaw = Math.abs(face.yaw || 0);
+    const yawCos = Math.max(this.minYawCos, Math.cos(absYaw));
+
+    const correctedEyeDistanceNorm =
+      eyeDistanceNorm / Math.pow(yawCos, this.yawScaleCompensation);
+
+    const desiredEyeDistanceWorld =
+      correctedEyeDistanceNorm * plane.width * this.sizeMultiplier;
+
     const scale = THREE.MathUtils.clamp(
       desiredEyeDistanceWorld / this.avatarEyeDistance,
       0.05,
@@ -375,9 +423,9 @@ export class AvatarController {
       x,
       y,
       scale,
-      yaw: face.yaw || 0,
-      pitch: face.pitch || 0,
-      roll: face.roll || 0,
+      yaw: face.yaw,
+      pitch: face.pitch,
+      roll: face.roll,
     };
   }
 
@@ -389,7 +437,6 @@ export class AvatarController {
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
 
-    // false = don't change CSS size
     this.renderer.setSize(width, height, false);
 
     console.log("[Avatar] Resized:", {
@@ -446,9 +493,7 @@ export class AvatarController {
       worldBox = new THREE.Box3().setFromObject(this.vrm.scene);
     }
 
-    const anchorNdc = this.anchorRoot.position
-      .clone()
-      .project(this.camera);
+    const anchorNdc = this.anchorRoot.position.clone().project(this.camera);
 
     const data = {
       hasVRM: Boolean(this.vrm),
@@ -462,10 +507,10 @@ export class AvatarController {
       anchorScale: this.anchorRoot.scale.x,
       anchorNDC: anchorNdc.toArray(),
       avatarEyeDistance: this.avatarEyeDistance,
+      modelRoot_position: this.modelRoot.position.toArray(),
+      verticalOffset: this.verticalOffset,
       modelVisible: this.vrm?.scene.visible,
-      modelInsideFrustum: worldBox
-        ? frustum.intersectsBox(worldBox)
-        : false,
+      modelInsideFrustum: worldBox ? frustum.intersectsBox(worldBox) : false,
       worldBoxMin: worldBox?.min.toArray(),
       worldBoxMax: worldBox?.max.toArray(),
       state: { ...this.state },
