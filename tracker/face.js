@@ -68,6 +68,9 @@ export function extractFace(landmarks, worldLandmarks, video, calibration) {
 
   const mouthOpen = dist2D(upperLip, lowerLip) / (eyeDistance || 1);
 
+  // Eye gaze extraction
+  const gaze = extractGaze(landmarks, w, h);
+
   return {
     x: eyeCenterX,
     y: eyeCenterY,
@@ -80,6 +83,53 @@ export function extractFace(landmarks, worldLandmarks, video, calibration) {
     roll: roll - calibration.roll,
     mouthOpen,
     confidence: 1.0,
+    gaze,
+  };
+}
+
+// ============================================================
+// Eye gaze: compute where each iris is relative to the eye bounds
+// Returns { leftX, leftY, rightX, rightY } in range [-1, 1]
+// where (0,0) = looking straight, (-1,0) = looking left, (0,-1) = looking down
+// ============================================================
+
+function extractGaze(landmarks, w, h) {
+  // Check if iris landmarks exist (indices 468-477)
+  if (landmarks.length < 474) return null;
+
+  const leftIris = get2D(landmarks, FACE.LEFT_IRIS_CENTER, w, h);
+  const leftInner = get2D(landmarks, FACE.LEFT_EYE_INNER, w, h);
+  const leftOuter = get2D(landmarks, FACE.LEFT_EYE_OUTER_CORNER, w, h);
+  const leftTop = get2D(landmarks, FACE.LEFT_EYE_TOP, w, h);
+  const leftBottom = get2D(landmarks, FACE.LEFT_EYE_BOTTOM, w, h);
+
+  const rightIris = get2D(landmarks, FACE.RIGHT_IRIS_CENTER, w, h);
+  const rightInner = get2D(landmarks, FACE.RIGHT_EYE_INNER, w, h);
+  const rightOuter = get2D(landmarks, FACE.RIGHT_EYE_OUTER_CORNER, w, h);
+  const rightTop = get2D(landmarks, FACE.RIGHT_EYE_TOP, w, h);
+  const rightBottom = get2D(landmarks, FACE.RIGHT_EYE_BOTTOM, w, h);
+
+  // Left eye: iris position relative to eye bounds
+  const leftEyeW = dist2D(leftInner, leftOuter) || 1;
+  const leftEyeH = dist2D(leftTop, leftBottom) || 1;
+  const leftCenterX = (leftInner.x + leftOuter.x) / 2;
+  const leftCenterY = (leftTop.y + leftBottom.y) / 2;
+  const leftX = ((leftIris.x - leftCenterX) / (leftEyeW * 0.5)) * 2;
+  const leftY = ((leftIris.y - leftCenterY) / (leftEyeH * 0.5)) * 2;
+
+  // Right eye
+  const rightEyeW = dist2D(rightInner, rightOuter) || 1;
+  const rightEyeH = dist2D(rightTop, rightBottom) || 1;
+  const rightCenterX = (rightInner.x + rightOuter.x) / 2;
+  const rightCenterY = (rightTop.y + rightBottom.y) / 2;
+  const rightX = ((rightIris.x - rightCenterX) / (rightEyeW * 0.5)) * 2;
+  const rightY = ((rightIris.y - rightCenterY) / (rightEyeH * 0.5)) * 2;
+
+  return {
+    leftX: Math.max(-1, Math.min(1, leftX)),
+    leftY: Math.max(-1, Math.min(1, leftY)),
+    rightX: Math.max(-1, Math.min(1, rightX)),
+    rightY: Math.max(-1, Math.min(1, rightY)),
   };
 }
 

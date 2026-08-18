@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Real-Time Depth (Cached)</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background: linear-gradient(135deg,#1e1e2e,#2a2a3e); color:#e0e0e0; min-height:100vh; padding:20px; }
+  .container { max-width: 1200px; margin: 0 auto; }
+  h1 { text-align:center; margin-bottom:20px; font-size:1.7em; background:linear-gradient(90deg,#60a5fa,#a78bfa); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
+  .settings { display:flex; gap:12px; justify-content:center; align-items:center; margin-bottom:15px; flex-wrap:wrap; }
+  .settings label { font-size:.9em; color:#9ca3af; }
+  select { background:rgba(255,255,255,.1); color:#e0e0e0; border:1px solid rgba(255,255,255,.2); border-radius:6px; padding:8px 10px; }
+  select:disabled { opacity:.4; }
+  .controls { display:flex; gap:10px; justify-content:center; margin-bottom:20px; flex-wrap:wrap; }
+  button { background:linear-gradient(135deg,#3b82f6,#8b5cf6); color:#fff; border:none; padding:12px 24px; border-radius:8px; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .btn-danger { background:linear-gradient(135deg,#ef4444,#dc2626); }
+  .videos { display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-bottom:20px; }
+  @media (max-width:768px){ .videos{grid-template-columns:1fr;} }
+  .panel { background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.1); border-radius:12px; padding:15px; }
+  .panel h3 { margin-bottom:10px; color:#a78bfa; font-size:1.05em; }
+  video, canvas { width:100%; height:auto; border-radius:8px; background:#000; display:block; }
+  .stats { background:rgba(0,0,0,.3); border:1px solid rgba(255,255,255,.1); border-radius:12px; padding:20px; margin-bottom:20px; }
+  .stat-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; }
+  .stat-item { background:rgba(255,255,255,.05); padding:10px; border-radius:8px; }
+  .stat-label { font-size:.8em; color:#9ca3af; margin-bottom:4px; }
+  .stat-value { font-size:1.05em; font-weight:600; color:#60a5fa; }
+  #status { text-align:center; padding:10px; margin-bottom:15px; border-radius:8px; background:rgba(255,255,255,.05); }
+  #status.loading{color:#fbbf24;} #status.success{color:#34d399;} #status.error{color:#f87171;}
+  .log { background:rgba(0,0,0,.4); border-radius:8px; padding:12px; font-family:Monaco,monospace; font-size:.82em; max-height:180px; overflow-y:auto; white-space:pre-wrap; }
+  .log-line{margin-bottom:3px;} .info{color:#60a5fa;} .success{color:#34d399;} .error{color:#f87171;} .warn{color:#fbbf24;}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🔮 Real-Time Depth (Cached)</h1>
+  <div id="status">Model will be cached after first download</div>
+
+  <div class="settings">
+    <label>Model:
+      <select id="modelSel">
+        <option value="midas" selected>MiDaS-Small (80 MB, fastest CPU)</option>
+        <option value="depth-anything-v2">Depth Anything V2 Small (27 MB, q8)</option>
+      </select>
+    </label>
+    <label>Backend:
+      <select id="deviceSel">
+        <option value="wasm" selected>WASM (CPU)</option>
+        <option value="webgpu">WebGPU</option>
+      </select>
+    </label>
+    <label>Precision:
+      <select id="dtypeSel">
+        <option value="q8" selected>q8</option>
+        <option value="q4">q4</option>
+        <option value="fp32">fp32</option>
+      </select>
+    </label>
+    <label>Input size:
+      <select id="sizeSel">
+        <option value="256" selected>256×256</option>
+        <option value="192">192×192</option>
+        <option value="384">384×384</option>
+      </select>
+    </label>
+    <label>Frame skip:
+      <select id="skipSel">
+        <option value="1">Every frame</option>
+        <option value="2" selected>Every 2nd</option>
+        <option value="3">Every 3rd</option>
+      </select>
+    </label>
+  </div>
+
+  <div class="controls">
+    <button id="startBtn">▶️ Start</button>
+    <button id="runOnceBtn" disabled>🎯 Run Once</button>
+    <button id="runLoopBtn" disabled>🔄 Run Loop</button>
+    <button id="stopBtn" disabled>⏹ Stop</button>
+    <button id="clearCacheBtn" class="btn-danger">🗑️ Clear Cache</button>
+  </div>
+
+  <div class="videos">
+    <div class="panel"><h3>📹 Webcam</h3><video id="webcam" autoplay playsinline muted></video></div>
+    <div class="panel"><h3>🌫️ Depth (bright = near)</h3><canvas id="depthCanvas"></canvas></div>
+  </div>
+
+  <div class="stats">
+    <div class="stat-grid">
+      <div class="stat-item"><div class="stat-label">Model</div><div class="stat-value" id="statModel">—</div></div>
+      <div class="stat-item"><div class="stat-label">Backend</div><div class="stat-value" id="statBackend">—</div></div>
+      <div class="stat-item"><div class="stat-label">Inference</div><div class="stat-value" id="statTime">—</div></div>
+      <div class="stat-item"><div class="stat-label">Avg (10)</div><div class="stat-value" id="statAvg">—</div></div>
+      <div class="stat-item"><div class="stat-label">Effective FPS</div><div class="stat-value" id="statFps">—</div></div>
+      <div class="stat-item"><div class="stat-label">Depth Size</div><div class="stat-value" id="statSize">—</div></div>
+    </div>
+  </div>
+
+  <div class="panel"><h3>📋 Log</h3><div class="log" id="log"></div></div>
+</div>
+
+<script type="module">
+const ORT_VERSION = "1.20.1";
+const ORT_DIST = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VERSION}/dist/`;
+const CACHE_NAME = 'depth-models-v1';
+
+const MODELS = {
+  midas: {
+    engine: "ort",
+    url: "https://huggingface.co/Heliosoph/midas-small-onnx/resolve/main/midas_v21_small_256.onnx",
+    fixedSize: 256,
+    size: "80 MB"
+  },
+  "depth-anything-v2": {
+    engine: "pipeline",
+    id: "onnx-community/depth-anything-v2-small",
+    size: "27 MB (q8)"
+  }
+};
+
+const video = document.getElementById("webcam");
+const depthCanvas = document.getElementById("depthCanvas");
+const depthCtx = depthCanvas.getContext("2d");
+const statusEl = document.getElementById("status");
+const logEl = document.getElementById("log");
+const modelSel = document.getElementById("modelSel");
+const deviceSel = document.getElementById("deviceSel");
+const dtypeSel = document.getElementById("dtypeSel");
+const sizeSel = document.getElementById("sizeSel");
+const skipSel = document.getElementById("skipSel");
+const startBtn = document.getElementById("startBtn");
+const runOnceBtn = document.getElementById("runOnceBtn");
+const runLoopBtn = document.getElementById("runLoopBtn");
+const stopBtn = document.getElementById("stopBtn");
+const clearCacheBtn = document.getElementById("clearCacheBtn");
+
+let engine = null;
+let loopRunning = false, isInferring = false;
+let times = [], frameCounter = 0, lastDepth = null;
+
+function setStatus(m, t=""){ statusEl.textContent = m; statusEl.className = t; }
+function log(m, t="info"){
+  const d = document.createElement("div");
+  d.className = `log-line ${t}`;
+  d.textContent = `[${new Date().toLocaleTimeString()}] ${m}`;
+  logEl.appendChild(d); logEl.scrollTop = logEl.scrollHeight; console.log(m);
+}
+
+// Caching helper for ONNX model
+async function fetchWithCache(url) {
+  const cache = await caches.open(CACHE_NAME);
+  const cached = await cache.match(url);
+  
+  if (cached) {
+    log(`✅ Loading from cache (instant)`, "success");
+    const buffer = await cached.arrayBuffer();
+    return buffer;
+  }
+  
+  log(`⬇️ Downloading model (first time)...`, "warn");
+  const response = await fetch(url, { mode: 'cors' });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  
+  await cache.put(url, response.clone());
+  const buffer = await response.arrayBuffer();
+  log(`✅ Cached for future use`, "success");
+  return buffer;
+}
+
+function loadOrt(){
+  return new Promise((res, rej) => {
+    if (window.ort) return res(window.ort);
+    const s = document.createElement("script");
+    s.src = ORT_DIST + "ort.all.min.js";
+    s.crossOrigin = "anonymous";
+    s.onload = () => res(window.ort);
+    s.onerror = () => rej(new Error("Failed to load onnxruntime-web"));
+    document.head.appendChild(s);
+  });
+}
+
+async function startWebcam(){
+  log("Requesting webcam...");
+  const stream = await navigator.mediaDevices.getUserMedia({ video:{ width:{ideal:1280}, height:{ideal:720} }, audio:false });
+  video.srcObject = stream;
+  await new Promise(r => video.onloadedmetadata = r);
+  await video.play();
+  log(`Webcam started: ${video.videoWidth}x${video.videoHeight}`, "success");
+}
+
+const threadsAvailable = typeof crossOriginIsolated !== "undefined" && crossOriginIsolated;
+
+async function loadModel(){
+  const modelKey = modelSel.value;
+  const cfg = MODELS[modelKey];
+  const device = deviceSel.value;
+
+  if (cfg.engine === "ort") {
+    // ---------- RAW ONNX RUNTIME (MiDaS) ----------
+    setStatus("Loading onnxruntime-web...", "loading");
+    const ort = await loadOrt();
+    ort.env.wasm.wasmPaths = ORT_DIST;
+    ort.env.wasm.numThreads = (device === "wasm" && threadsAvailable) ? (navigator.hardwareConcurrency || 4) : (device === "wasm" ? 1 : 0);
+    
+    if (device === "wasm") {
+      log(threadsAvailable
+        ? `✅ COOP/COEP active — ORT WASM threads: ${ort.env.wasm.numThreads}`
+        : "⚠️ Not cross-origin isolated — single-threaded. Use server.py!", "warn");
+    }
+    
+    log(`Fetching ${cfg.url.split('/').pop()}...`);
+    const modelBuffer = await fetchWithCache(cfg.url);
+    
+    log(`Creating ORT session (${device})...`);
+    const session = await ort.InferenceSession.create(modelBuffer, {
+      executionProviders: device === "webgpu" ? ["webgpu"] : ["wasm"]
+    });
+    
+    engine = { type:"ort", ort, session, inName: session.inputNames[0], outName: session.outputNames[0] };
+    log(`ORT session ready`, "success");
+    document.getElementById("statBackend").textContent = `${device} · ort · ${device==="wasm"?ort.env.wasm.numThreads+"T":"GPU"}`;
+    
+  } else {
+    // ---------- TRANSFORMERS.JS PIPELINE ----------
+    let dtype = dtypeSel.value;
+    if (device === "wasm" && dtype === "fp16") { dtype = "q8"; dtypeSel.value = "q8"; }
+    
+    setStatus("Loading Transformers.js...", "loading");
+    const { pipeline, env, RawImage } = await import("https://cdn.jsdelivr.net/npm/@huggingface/transformers@3");
+    window.__RawImage = RawImage;
+    
+    if (device === "wasm") {
+      env.backends.onnx.wasm.proxy = true;
+      env.backends.onnx.wasm.numThreads = threadsAvailable ? (navigator.hardwareConcurrency || 4) : 1;
+      log(threadsAvailable ? `✅ WASM threads: ${env.backends.onnx.wasm.numThreads}` : "⚠️ Single-threaded WASM. Use server.py!", "warn");
+    } else env.backends.onnx.wasm.proxy = false;
+
+    log(`Creating pipeline (${device}, ${dtype})...`);
+    const pipe = await pipeline("depth-estimation", cfg.id, { device, dtype });
+    engine = { type:"pipeline", pipe };
+    document.getElementById("statBackend").textContent = `${device} · tfjs · ${dtype}`;
+  }
+
+  document.getElementById("statModel").textContent = `${modelKey} (${cfg.size})`;
+  setStatus("Loaded! Warmup...", "loading");
+  await runInference(true);
+  setStatus("Ready ✅ (model cached)", "success");
+}
+
+function grabFrame(size){
+  const w = size, h = size;
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  const ctx = c.getContext("2d");
+  const va = video.videoWidth / video.videoHeight;
+  let sx, sy, sw, sh;
+  if (va > 1) { sh = video.videoHeight; sw = sh; sx = (video.videoWidth - sw)/2; sy = 0; }
+  else      { sw = video.videoWidth;  sh = sw; sx = 0; sy = (video.videoHeight - sh)/2; }
+  ctx.drawImage(video, sx, sy, sw, sh, 0, 0, w, h);
+  return ctx.getImageData(0, 0, w, h);
+}
+
+function preprocessMidas(img){
+  const { data } = img, N = 256*256;
+  const out = new Float32Array(3*N);
+  for (let i = 0; i < N; i++){
+    const r = data[i*4]/255, g = data[i*4+1]/255, b = data[i*4+2]/255;
+    out[i]       = (b - 0.406) / 0.225;
+    out[N + i]   = (g - 0.456) / 0.224;
+    out[2*N + i] = (r - 0.485) / 0.229;
+  }
+  return out;
+}
+
+async function runDepth(img){
+  if (engine.type === "ort"){
+    const t = new engine.ort.Tensor("float32", preprocessMidas(img), [1,3,256,256]);
+    const res = await engine.session.run({ [engine.inName]: t });
+    const out = res[engine.outName];
+    return { data: out.data, width: 256, height: 256 };
+  } else {
+    const R = window.__RawImage;
+    const raw = new R(img.data, img.width, img.height, 4);
+    const result = await engine.pipe(raw);
+    return { data: result.depth.data, width: result.depth.width, height: result.depth.height };
+  }
+}
+
+function renderDepthMap(d){
+  const { data, width: w, height: h } = d;
+  depthCanvas.width = w; depthCanvas.height = h;
+  let min = Infinity, max = -Infinity;
+  for (let i = 0; i < data.length; i++){ if (data[i]<min) min=data[i]; if (data[i]>max) max=data[i]; }
+  const range = (max-min) || 1;
+  const img = depthCtx.createImageData(w, h);
+  for (let i = 0; i < w*h; i++){
+    const v = Math.round(((data[i]-min)/range)*255);
+    const j = i*4;
+    img.data[j]=v; img.data[j+1]=v; img.data[j+2]=v; img.data[j+3]=255;
+  }
+  depthCtx.putImageData(img, 0, 0);
+}
+
+async function runInference(warmup=false){
+  if (!engine){ log("Model not loaded!", "error"); return; }
+  if (isInferring) return;
+  frameCounter++;
+  const skip = parseInt(skipSel.value, 10);
+  if (!warmup && frameCounter % skip !== 0){ if (lastDepth) renderDepthMap(lastDepth); return; }
+
+  isInferring = true;
+  try {
+    const size = engine.type === "ort" ? 256 : parseInt(sizeSel.value, 10);
+    const img = grabFrame(size);
+    const t0 = performance.now();
+    const depth = await runDepth(img);
+    const ms = performance.now() - t0;
+    lastDepth = depth;
+
+    if (!warmup){ times.push(ms); if (times.length > 10) times.shift(); }
+    renderDepthMap(depth);
+
+    const avg = times.length ? times.reduce((a,b)=>a+b,0)/times.length : ms;
+    const effFps = 1000 / (avg * skip);
+    if (warmup) log(`Warmup: ${ms.toFixed(1)} ms`, "warn");
+    else log(`Depth: ${ms.toFixed(1)} ms | effective ${effFps.toFixed(1)} FPS`, "success");
+
+    document.getElementById("statTime").textContent = `${ms.toFixed(1)} ms`;
+    document.getElementById("statAvg").textContent  = `${avg.toFixed(1)} ms`;
+    document.getElementById("statFps").textContent  = `${effFps.toFixed(1)} fps`;
+    document.getElementById("statSize").textContent = `${depth.width}×${depth.height}`;
+    await new Promise(r => setTimeout(r, 5));
+  } catch (err){
+    log(`Inference error: ${err.message}`, "error");
+  } finally { isInferring = false; }
+}
+
+async function runLoop(){
+  loopRunning = true;
+  while (loopRunning){ await runInference(); await new Promise(r => requestAnimationFrame(r)); }
+}
+
+async function initialize(){
+  startBtn.disabled = true;
+  try {
+    if (!video.srcObject) await startWebcam();
+    await loadModel();
+    runOnceBtn.disabled = false; runLoopBtn.disabled = false;
+  } catch (err){
+    log(`Init failed: ${err.message}`, "error");
+    setStatus(`Error: ${err.message}`, "error");
+  }
+  startBtn.disabled = false;
+}
+
+function syncSelects(){
+  const isOrt = MODELS[modelSel.value].engine === "ort";
+  sizeSel.disabled = isOrt;
+  dtypeSel.disabled = isOrt;
+  if (isOrt) sizeSel.value = "256";
+}
+
+clearCacheBtn.addEventListener("click", async () => {
+  if (confirm("Clear all cached models? They will re-download next time.")) {
+    const keys = await caches.keys();
+    for (const key of keys) {
+      if (key.startsWith('depth-models')) {
+        await caches.delete(key);
+        log(`Deleted cache: ${key}`, "warn");
+      }
+    }
+    alert("Cache cleared. Models will re-download on next load.");
+  }
+});
+
+modelSel.addEventListener("change", () => { syncSelects(); if (engine){ log("Model changed — reloading...", "warn"); loopRunning=false; setTimeout(()=>location.reload(),300);} });
+deviceSel.addEventListener("change", () => { if (engine){ log("Backend changed — reloading...", "warn"); loopRunning=false; setTimeout(()=>location.reload(),300);} });
+dtypeSel.addEventListener("change", () => { if (engine){ log("Precision changed — reloading...", "warn"); loopRunning=false; setTimeout(()=>location.reload(),300);} });
+syncSelects();
+
+startBtn.addEventListener("click", initialize);
+runOnceBtn.addEventListener("click", () => runInference());
+runLoopBtn.addEventListener("click", () => { runLoopBtn.disabled = true; stopBtn.disabled = false; runLoop(); });
+stopBtn.addEventListener("click", () => { loopRunning = false; runLoopBtn.disabled = false; stopBtn.disabled = true; log("Loop stopped.", "warn"); });
+</script>
+</body>
+</html>

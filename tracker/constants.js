@@ -9,6 +9,17 @@ export const FACE = {
   LOWER_LIP: 14,
   LEFT_EAR: 234,
   RIGHT_EAR: 454,
+  // Eye iris landmarks for gaze tracking
+  LEFT_IRIS_CENTER: 468,
+  RIGHT_IRIS_CENTER: 473,
+  LEFT_EYE_INNER: 133,
+  LEFT_EYE_OUTER_CORNER: 33,
+  RIGHT_EYE_INNER: 362,
+  RIGHT_EYE_OUTER_CORNER: 263,
+  LEFT_EYE_TOP: 159,
+  LEFT_EYE_BOTTOM: 145,
+  RIGHT_EYE_TOP: 386,
+  RIGHT_EYE_BOTTOM: 374,
 };
 
 // Pose landmark indices (MediaPipe PoseLandmarker)
@@ -36,4 +47,30 @@ export const POSE = {
   RIGHT_HEEL: 30,
   LEFT_FOOT_INDEX: 31,
   RIGHT_FOOT_INDEX: 32,
+};
+
+// Hand landmark indices (MediaPipe HandLandmarker)
+// Each hand has 21 landmarks
+export const HAND = {
+  WRIST: 0,
+  THUMB_CMC: 1,
+  THUMB_MCP: 2,
+  THUMB_IP: 3,
+  THUMB_TIP: 4,
+  INDEX_MCP: 5,
+  INDEX_PIP: 6,
+  INDEX_DIP: 7,
+  INDEX_TIP: 8,
+  MIDDLE_MCP: 9,
+  MIDDLE_PIP: 10,
+  MIDDLE_DIP: 11,
+  MIDDLE_TIP: 12,
+  RING_MCP: 13,
+  RING_PIP: 14,
+  RING_DIP: 15,
+  RING_TIP: 16,
+  PINKY_MCP: 17,
+  PINKY_PIP: 18,
+  PINKY_DIP: 19,
+  PINKY_TIP: 20,
 };

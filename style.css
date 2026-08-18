@@ -28,22 +28,33 @@ body {
   position: absolute;
   top: 50%;
   left: 50%;
-  transform: translate(-50%, -50%);
   max-width: 100%;
   max-height: 100%;
 }
 
+/* Layer order:
+   1 = webcam (real video, bottom)
+   2 = bgCanvas (privacy mask, on top of video)
+   3 = overlay (avatar, on top of mask)
+*/
 #webcam {
   transform: translate(-50%, -50%) scaleX(-1);
   z-index: 1;
 }
 
-#overlay {
+#bgCanvas {
   transform: translate(-50%, -50%);
+  z-index: 2;
+  pointer-events: none;
+  /* Must be transparent background — only mask pixels are opaque */
+  background: transparent;
 }
 
-#bgCanvas { z-index: 2; }
-#overlay { z-index: 3; pointer-events: none; }
+#overlay {
+  transform: translate(-50%, -50%);
+  z-index: 3;
+  pointer-events: none;
+}
 
 .hud {
   position: absolute;
@@ -123,7 +134,11 @@ body {
 .btn.primary:hover { background: #6d28d9; }
 
 .btn.record { color: #f44; font-weight: bold; }
-.btn.record.active { background: #f44; color: #fff; animation: pulse 1s infinite; }
+.btn.record.active {
+  background: #f44;
+  color: #fff;
+  animation: pulse 1s infinite;
+}
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }

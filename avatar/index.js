@@ -3,7 +3,7 @@ import { VRMUtils } from "@pixiv/three-vrm";
 import { _euler } from "./constants.js";
 import { loadVRM, measureModel } from "./loader.js";
 import { findAllBones, captureRestPose } from "./bones.js";
-import { driveHead, driveTorso, driveLimbs } from "./drivers.js";
+import { driveHead, driveEyes, driveTorso, driveHips, driveLimbs, driveFingers } from "./drivers.js";
 import { driveExpressions } from "./expressions.js";
 import { computeTarget } from "./target.js";
 
@@ -12,7 +12,6 @@ export class AvatarController {
     this.canvas = canvas;
     this.vrm = null;
 
-    // Scene
     this.scene = new THREE.Scene();
     this.scene.background = null;
 
@@ -32,13 +31,11 @@ export class AvatarController {
     dirLight.position.set(1, 2, 3);
     this.scene.add(dirLight);
 
-    // Hierarchy
     this.anchorRoot = new THREE.Group();
     this.scene.add(this.anchorRoot);
     this.modelRoot = new THREE.Group();
     this.anchorRoot.add(this.modelRoot);
 
-    // Debug markers
     this.debugBox = new THREE.Mesh(
       new THREE.BoxGeometry(0.1, 0.1, 0.1),
       new THREE.MeshBasicMaterial({ color: 0xff0000, wireframe: true })
@@ -49,7 +46,6 @@ export class AvatarController {
     );
     this.scene.add(this.debugBox, this.anchorMarker);
 
-    // Config
     this.config = {
       sizeMultiplier: 0.4,
       verticalOffset: 0.05,
@@ -65,19 +61,23 @@ export class AvatarController {
       avatarShoulderToEyeRatio: 4.6,
     };
 
-    // State
     this.state = { x: 0, y: 0, scale: 1, yaw: 0, pitch: 0, roll: 0, shoulderTilt: 0 };
     this.bones = {};
     this.rest = null;
     this.testMode = "off";
+    this.currentMode = "none";
 
-    // Debug
-    this.debugLimbs = true;
+    this.debugLimbs = false;
     this._fc = 0;
     this._logInterval = 120;
+
+    this.hasEyeBones = false;
+    this.hasFingerBones = false;
+    this.hasHipBone = false;
+    this._loggedFeatures = false;
+    this._lastModeLog = "";
   }
 
-  // Convenience accessors
   get response() { return this.config.response; }
   set response(v) { this.config.response = v; }
 
@@ -86,9 +86,8 @@ export class AvatarController {
     this.config.sourceHeight = Math.max(1, h);
   }
 
-  async loadModel(url) {
+  async loadVRM(url) {
     console.log("[Avatar] Loading:", url);
-
     if (this.vrm) {
       this.modelRoot.remove(this.vrm.scene);
       VRMUtils.deepDispose(this.vrm.scene);
@@ -105,7 +104,6 @@ export class AvatarController {
 
     this.modelRoot.add(this.vrm.scene);
 
-    // Measure + setup
     const m = measureModel(this.vrm, this.anchorRoot, this.modelRoot, this.scene);
     this.config.avatarEyeDistance = m.eyeDistance;
     this.config.avatarShoulderWidth = m.shoulderWidth;
@@ -114,7 +112,16 @@ export class AvatarController {
     this.bones = findAllBones(this.vrm);
     this.rest = captureRestPose(this.vrm, this.bones);
 
-    // Log expressions
+    this.hasEyeBones = !!(this.bones.leftEye && this.bones.rightEye);
+    this.hasFingerBones = !!(this.bones.leftIndexProximal && this.bones.rightIndexProximal);
+    this.hasHipBone = !!this.bones.hips;
+
+    console.log("[Avatar] Features:",
+      "eyes:", this.hasEyeBones,
+      "| fingers:", this.hasFingerBones,
+      "| hips:", this.hasHipBone
+    );
+
     if (this.vrm.expressionManager) {
       const names = this.vrm.expressionManager.expressions.map((e) => e.expressionName);
       console.log("[Avatar] Expressions:", names.join(", "));
@@ -123,12 +130,10 @@ export class AvatarController {
     console.log("[Avatar] VRM loaded.");
   }
 
-  // Alias for backward compatibility
-  async loadVRM(url) { return this.loadModel(url); }
-
   update(data, dt = 1 / 60) {
     let face = data?.face || null;
     const body = data?.body || null;
+    const hands = data?.hands || null;
 
     if (this.testMode === "center") {
       face = { xNorm: 0.5, yNorm: 0.5, eyeDistanceNorm: 0.15, yaw: 0, pitch: 0, roll: 0 };
@@ -153,17 +158,56 @@ export class AvatarController {
     this.anchorRoot.scale.setScalar(this.state.scale);
     this.anchorMarker.position.set(this.state.x, this.state.y, 0);
 
-    // Bone drivers
     const a = 1 - Math.exp(-this.config.response * Math.min(dt, 0.1));
+
+    // Track mode changes
+    if (body?.mode) {
+      this.currentMode = body.mode;
+      if (body.mode !== this._lastModeLog) {
+        this._lastModeLog = body.mode;
+        console.log(`[Avatar] Mode: ${body.mode} | arms:${body.hasLeftArm}/${body.hasRightArm} legs:${body.hasLeftLeg}/${body.hasRightLeg}`);
+      }
+    }
+
+    // Head
     driveHead(this.bones, this.state, this.config.neckHeadSplit, a);
+
+    // Eyes
+    if (this.hasEyeBones && face?.gaze) {
+      driveEyes(this.bones, face.gaze, a);
+    }
+
+    // Torso
     driveTorso(this.bones, body?.torso, this.state.shoulderTilt, a);
 
-    const shouldLog = this.debugLimbs && this._fc % this._logInterval === 0;
-    driveLimbs(this.vrm, this.bones, this.rest, body, a, shouldLog);
+    // Hips
+    if (this.hasHipBone && body?.hipRotation) {
+      driveHips(this.bones, body.hipRotation, body.mode, a);
+    }
+
+    // Limbs
+    const limbLog = this.debugLimbs && this._fc % this._logInterval === 0;
+    driveLimbs(this.vrm, this.bones, this.rest, body, a, limbLog);
     this._fc++;
 
-    driveExpressions(this.vrm, data);
+    // Fingers
+    if (this.hasFingerBones && hands) {
+      driveFingers(this.bones, hands, a);
+    }
 
+    // One-time feature log
+    if (!this._loggedFeatures && (hands || face?.gaze)) {
+      this._loggedFeatures = true;
+      console.log("[Avatar] Active:",
+        "head:✓",
+        `eyes:${face?.gaze ? "✓" : "✗"}`,
+        `hands:${hands ? Object.keys(hands).join(",") : "✗"}`,
+        `fingers:${this.hasFingerBones ? "✓" : "✗"}`,
+        `hips:${this.hasHipBone ? "✓" : "✗"}`
+      );
+    }
+
+    driveExpressions(this.vrm, data);
     if (this.vrm) this.vrm.update(Math.min(dt, 0.1));
   }
 
@@ -183,40 +227,31 @@ export class AvatarController {
     console.log("[Avatar] Resized:", w, "x", h);
   }
 
-  // Debug
   setTestMode(m) { this.testMode = m; }
   toggleDebugBox(v) { this.debugBox.visible = v; }
   toggleAnchorMarker(v) { this.anchorMarker.visible = v; }
 
-  diagnoseLimbs() {
-    console.log("=== LIMB DIAGNOSTIC ===");
-    console.log("VRM:", !!this.vrm, "| Rest:", !!this.rest);
-    const list = ["leftUpperArm","leftLowerArm","rightUpperArm","rightLowerArm",
-      "leftUpperLeg","leftLowerLeg","rightUpperLeg","rightLowerLeg"];
-    for (const n of list) {
-      const b = this.bones[n];
-      if (!b) { console.log(`${n}: MISSING`); continue; }
-      _euler.setFromQuaternion(b.quaternion);
-      console.log(`${n}: e°(${(_euler.x*57.3).toFixed(1)},${(_euler.y*57.3).toFixed(1)},${(_euler.z*57.3).toFixed(1)})`);
-      if (this.rest?.[n]) {
-        const d = this.rest[n].dir;
-        console.log(`  rest: (${d.x.toFixed(3)},${d.y.toFixed(3)},${d.z.toFixed(3)})`);
-      }
-    }
-    console.log("=======================");
-  }
+  diagnose() {
+    console.log("=== FULL DIAGNOSTIC ===");
+    console.log("VRM:", !!this.vrm, "| Mode:", this.currentMode);
+    console.log("Eyes:", this.hasEyeBones, "| Fingers:", this.hasFingerBones, "| Hips:", this.hasHipBone);
 
-  debugBodyData(body) {
-    if (!body) { console.log("body: null"); return; }
-    console.log("=== BODY ===");
-    console.log(`synth:${body.synthesized} world:${body.worldSpace}`);
-    console.log(`vis: sh:${body.hasShoulders} arms:${body.hasLeftArm}/${body.hasRightArm} legs:${body.hasLeftLeg}/${body.hasRightLeg}`);
-    if (body.joints3d) {
-      const f = (p) => `(${p.x.toFixed(3)},${p.y.toFixed(3)},${p.z.toFixed(3)})`;
-      for (const k of ["leftShoulder","leftElbow","leftWrist","rightShoulder","rightElbow","rightWrist"]) {
-        if (body.joints3d[k]) console.log(`  ${k}: ${f(body.joints3d[k])}`);
-      }
+    const limbBones = ["leftUpperArm", "leftLowerArm", "rightUpperArm", "rightLowerArm",
+      "leftUpperLeg", "leftLowerLeg", "rightUpperLeg", "rightLowerLeg"];
+    for (const n of limbBones) {
+      const b = this.bones[n];
+      if (!b) { console.log(`  ${n}: MISSING`); continue; }
+      _euler.setFromQuaternion(b.quaternion);
+      console.log(`  ${n}: e°(${(_euler.x * 57.3).toFixed(1)},${(_euler.y * 57.3).toFixed(1)},${(_euler.z * 57.3).toFixed(1)})`);
     }
-    console.log("============");
+
+    const fingerBones = ["leftIndexProximal", "leftMiddleProximal", "rightIndexProximal"];
+    for (const n of fingerBones) {
+      console.log(`  ${n}: ${this.bones[n] ? "✓" : "MISSING"}`);
+    }
+
+    console.log("  hips:", this.bones.hips ? "✓" : "MISSING");
+    console.log("  leftEye:", this.bones.leftEye ? "✓" : "MISSING");
+    console.log("=======================");
   }
 }
