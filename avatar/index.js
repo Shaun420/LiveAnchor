@@ -48,7 +48,7 @@ export class AvatarController {
 
     this.config = {
       sizeMultiplier: 0.4,
-      verticalOffset: 0.05,
+      verticalOffset: 0.15,
       yawScaleCompensation: 0.9,
       minYawCos: 0.7,
       shoulderScaleWeight: 0.7,
@@ -192,7 +192,7 @@ export class AvatarController {
 
     // Fingers
     if (this.hasFingerBones && hands) {
-      driveFingers(this.bones, hands, a);
+      driveFingers(this.vrm, this.bones, this.rest, hands, a);
     }
 
     // One-time feature log

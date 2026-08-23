@@ -1,197 +1,308 @@
-* { box-sizing: border-box; margin: 0; padding: 0; }
+/* ─── Reset ─────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  -webkit-tap-highlight-color: transparent;
+}
 
-body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background: #0a0a0f;
-  color: #e0e0e0;
-  height: 100vh;
+html, body {
+  width: 100%;
+  height: 100%;
   overflow: hidden;
+  background: #000;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #fff;
 }
 
+/* ─── App Layout ─────────────────────────────────────────── */
 .app {
-  display: flex;
+  width: 100vw;
   height: 100vh;
+  position: relative;
+  display: flex;
+  flex-direction: column;
 }
 
-/* Stage */
+/* ─── Stage ──────────────────────────────────────────────── */
 .stage {
   flex: 1;
   position: relative;
-  background: #000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   overflow: hidden;
+  background: #000;
 }
 
-#webcam, #bgCanvas, #overlay {
+#webcam, #overlay {
   position: absolute;
   top: 50%;
   left: 50%;
-  max-width: 100%;
-  max-height: 100%;
-}
-
-/* Layer order:
-   1 = webcam (real video, bottom)
-   2 = bgCanvas (privacy mask, on top of video)
-   3 = overlay (avatar, on top of mask)
-*/
-#webcam {
-  transform: translate(-50%, -50%) scaleX(-1);
-  z-index: 1;
-}
-
-#bgCanvas {
   transform: translate(-50%, -50%);
-  z-index: 2;
-  pointer-events: none;
-  /* Must be transparent background — only mask pixels are opaque */
-  background: transparent;
+  /* Fill the stage while keeping aspect ratio */
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
-#overlay {
-  transform: translate(-50%, -50%);
-  z-index: 3;
-  pointer-events: none;
-}
+#webcam  { z-index: 1; }
+#overlay { z-index: 2; pointer-events: none; }
 
-.hud {
+/* ─── HUD Top ────────────────────────────────────────────── */
+.hud-top {
   position: absolute;
-  top: 12px;
-  left: 12px;
+  top: 0;
+  left: 0;
+  right: 0;
   z-index: 10;
   display: flex;
-  gap: 16px;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: linear-gradient(to bottom, rgba(0,0,0,0.6), transparent);
+  font-family: monospace;
   font-size: 13px;
+}
+
+#fps { color: #0f0; }
+
+.status-dot { color: #f44; font-size: 10px; }
+.status-dot.active { color: #0f0; }
+
+#modeLabel {
+  margin-left: auto;
+  font-size: 11px;
+  color: #aaa;
+  background: rgba(0,0,0,0.4);
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+/* ─── HUD Bottom ─────────────────────────────────────────── */
+.hud-bottom {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  display: flex;
+  justify-content: space-around;
+  align-items: center;
+  padding: 16px;
+  padding-bottom: max(16px, env(safe-area-inset-bottom));
+  background: linear-gradient(to top, rgba(0,0,0,0.7), transparent);
+}
+
+.hud-btn {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.3);
+  background: rgba(0,0,0,0.5);
+  color: #fff;
+  font-size: 20px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+.hud-btn:active { transform: scale(0.92); background: rgba(255,255,255,0.2); }
+.hud-btn.active { border-color: #f44; color: #f44; }
+.hud-btn.primary { border-color: #7c3aed; background: #7c3aed; }
+
+/* ─── Debug Overlay ──────────────────────────────────────── */
+.debug-overlay {
+  position: absolute;
+  top: 50px;
+  left: 8px;
+  z-index: 9;
+  font-size: 11px;
   font-family: monospace;
   color: #0f0;
-  text-shadow: 0 0 4px #000;
+  text-shadow: 0 1px 2px #000;
+  white-space: pre;
+  pointer-events: none;
+  display: none;
 }
 
-#trackingStatus { color: #f44; }
-#trackingStatus.active { color: #0f0; }
+.debug-overlay.visible { display: block; }
 
-/* Panel */
-.panel {
-  width: 300px;
+/* ─── Settings Drawer ────────────────────────────────────── */
+.drawer {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
   background: #111118;
-  border-left: 1px solid #222;
-  padding: 24px 20px;
+  border-radius: 20px 20px 0 0;
+  transform: translateY(100%);
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  max-height: 80vh;
   overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  -webkit-overflow-scrolling: touch;
 }
 
-.panel h2 {
-  font-size: 24px;
-  color: #fff;
-  margin-bottom: 0;
+.drawer.open { transform: translateY(0); }
+
+.drawer-handle {
+  width: 40px;
+  height: 4px;
+  background: #444;
+  border-radius: 2px;
+  margin: 12px auto 0;
 }
 
-.subtitle {
-  font-size: 12px;
-  color: #666;
-  margin-bottom: 12px;
+.drawer-content {
+  padding: 16px 20px;
+  padding-bottom: max(20px, env(safe-area-inset-bottom));
 }
 
-.section {
-  background: #18181f;
-  border-radius: 10px;
-  padding: 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+.drawer-content h2 {
+  font-size: 20px;
+  margin-bottom: 16px;
+  background: linear-gradient(90deg, #7c3aed, #60a5fa);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
 }
 
-.section h3 {
+.setting-group {
+  margin-bottom: 20px;
+}
+
+.setting-group h3 {
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 1px;
-  color: #888;
+  color: #666;
+  margin-bottom: 10px;
 }
 
+/* ─── Controls ───────────────────────────────────────────── */
 .btn {
-  padding: 10px 16px;
+  width: 100%;
+  padding: 12px 16px;
   border: 1px solid #333;
-  border-radius: 8px;
-  background: #222;
+  border-radius: 10px;
+  background: #1a1a24;
   color: #ddd;
-  font-size: 14px;
+  font-size: 15px;
   cursor: pointer;
+  text-align: center;
+  margin-bottom: 8px;
   transition: all 0.15s;
 }
 
-.btn:hover { background: #333; border-color: #555; }
-
-.btn.primary {
-  background: #7c3aed;
-  border-color: #7c3aed;
-  color: #fff;
-}
-
-.btn.primary:hover { background: #6d28d9; }
-
-.btn.record { color: #f44; font-weight: bold; }
-.btn.record.active {
-  background: #f44;
-  color: #fff;
-  animation: pulse 1s infinite;
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.6; }
-}
-
-.toggle {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 14px;
-  cursor: pointer;
-}
-
-.toggle input { accent-color: #7c3aed; }
+.btn:active { background: #2a2a3a; }
 
 .file-btn {
-  display: inline-block;
-  padding: 10px 16px;
-  background: #222;
-  border: 1px dashed #555;
-  border-radius: 8px;
+  display: block;
+  width: 100%;
+  padding: 12px 16px;
+  border: 1px dashed #444;
+  border-radius: 10px;
+  background: #1a1a24;
+  color: #aaa;
+  font-size: 15px;
   text-align: center;
   cursor: pointer;
-  font-size: 14px;
-  color: #aaa;
-  transition: all 0.15s;
+  margin-bottom: 8px;
 }
 
-.file-btn:hover { border-color: #7c3aed; color: #fff; }
-
-.slider-label {
+.row-label {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 13px;
-  color: #aaa;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 0;
+  border-bottom: 1px solid #222;
+  font-size: 15px;
+  cursor: pointer;
 }
 
-.slider-label input[type="range"] {
+.row-label input[type="checkbox"] {
+  width: 44px;
+  height: 26px;
   accent-color: #7c3aed;
 }
 
-.record-status {
-  font-size: 12px;
-  color: #888;
+.col-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 0;
+  font-size: 15px;
 }
 
-.debug pre {
-  font-size: 11px;
+.col-label input[type="range"] {
+  width: 100%;
+  accent-color: #7c3aed;
+}
+
+.hint {
+  font-size: 12px;
   color: #666;
-  white-space: pre-wrap;
-  word-break: break-all;
-  max-height: 200px;
-  overflow-y: auto;
+  margin-top: 4px;
+  display: block;
+}
+
+/* ─── Desktop layout (when not on phone) ────────────────── */
+@media (min-width: 768px) {
+  .app {
+    flex-direction: row;
+  }
+
+  .stage {
+    flex: 1;
+  }
+
+  .drawer {
+    position: relative;
+    transform: none !important;
+    width: 300px;
+    border-radius: 0;
+    max-height: 100vh;
+    border-left: 1px solid #222;
+  }
+
+  .drawer-handle { display: none; }
+
+  .hud-bottom {
+    justify-content: flex-start;
+    gap: 12px;
+    padding: 16px;
+  }
+
+  .debug-overlay {
+    font-size: 12px;
+  }
+}
+
+/* ─── Landscape phone ────────────────────────────────────── */
+@media (max-height: 500px) and (orientation: landscape) {
+  .hud-bottom {
+    flex-direction: column;
+    width: 60px;
+    height: 100%;
+    top: 0;
+    bottom: auto;
+    right: 0;
+    left: auto;
+    padding: 8px;
+    background: linear-gradient(to left, rgba(0,0,0,0.7), transparent);
+  }
+
+  .drawer {
+    max-height: 100vh;
+    width: 280px;
+    right: 0;
+    left: auto;
+    bottom: 0;
+    top: 0;
+    border-radius: 20px 0 0 20px;
+    transform: translateX(100%);
+  }
+
+  .drawer.open { transform: translateX(0); }
 }

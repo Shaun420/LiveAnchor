@@ -1,14 +1,16 @@
 import * as THREE from "three";
 import { LIMB_CHAINS, FINGER_BONES, _v3a, _v3c, _qa, _qb, _euler } from "./constants.js";
 
+/**
+ * Utility helper to smoothly interpolate a single rotation axis (fine for 1-DoF joints like fingers)
+ */
 export function lerpBone(bone, axis, target, alpha) {
   if (!bone) return;
   bone.rotation[axis] = THREE.MathUtils.lerp(bone.rotation[axis], target, alpha);
 }
 
 // ============================================================
-// Global sign controls for webcam-mirrored setups
-// If motion still feels wrong, change only these.
+// Global Sign Configurations
 // ============================================================
 const HEAD_SIGNS = {
   yaw: -1,
@@ -17,13 +19,15 @@ const HEAD_SIGNS = {
 };
 
 const EYE_SIGNS = {
-  x: 1,   // vertical
-  y: 1,   // horizontal
+  x: 1,  // Pitch (vertical)
+  y: 1,  // Yaw (horizontal)
 };
 
-// ======================== Head ========================
+// ======================== Head & Neck (Quaternion-Based) ========================
 
 export function driveHead(bones, state, neckHeadSplit, alpha) {
+  if (!bones.head) return;
+
   const yaw = state.yaw * HEAD_SIGNS.yaw;
   const pitch = state.pitch * HEAD_SIGNS.pitch;
   const roll = state.roll * HEAD_SIGNS.roll;
@@ -31,16 +35,20 @@ export function driveHead(bones, state, neckHeadSplit, alpha) {
   const nf = neckHeadSplit;
   const hf = 1 - nf;
 
-  lerpBone(bones.head, "y", yaw * hf, alpha);
-  lerpBone(bones.head, "x", pitch * hf, alpha);
-  lerpBone(bones.head, "z", roll * hf, alpha);
+  // 1. Solve Head Rotation (using YXZ Euler order to prevent gimbal locks)
+  _euler.set(pitch * hf, yaw * hf, roll * hf, "YXZ");
+  _qa.setFromEuler(_euler);
+  bones.head.quaternion.slerp(_qa, alpha);
 
-  lerpBone(bones.neck, "y", yaw * nf, alpha);
-  lerpBone(bones.neck, "x", pitch * nf, alpha);
-  lerpBone(bones.neck, "z", roll * nf, alpha);
+  // 2. Solve Neck Rotation
+  if (bones.neck) {
+    _euler.set(pitch * nf, yaw * nf, roll * nf, "YXZ");
+    _qa.setFromEuler(_euler);
+    bones.neck.quaternion.slerp(_qa, alpha);
+  }
 }
 
-// ======================== Eyes ========================
+// ======================== Eye Gaze ========================
 
 const MAX_EYE_ANGLE = 0.4;
 
@@ -74,41 +82,51 @@ export function driveEyes(bones, gaze, alpha) {
   }
 }
 
-// ======================== Torso ========================
+// ======================== Torso (Quaternion-Based) ========================
 
 export function driveTorso(bones, torso, shoulderTilt, alpha) {
   if (!torso) return;
 
+  // Map and distribute torso yaw/pitch/roll across the spine chain
+  const yaw = -torso.yaw;
+  const pitch = torso.pitch;
+  const roll = -shoulderTilt;
+
   const chain = [
-    [bones.spine, 0.3],
-    [bones.chest, 0.3],
-    [bones.upperChest, 0.4],
+    { bone: bones.spine, weight: 0.3 },
+    { bone: bones.chest, weight: 0.3 },
+    { bone: bones.upperChest, weight: 0.4 },
   ];
 
-  for (const [bone, w] of chain) {
+  for (const { bone, weight } of chain) {
     if (!bone) continue;
-    lerpBone(bone, "y", THREE.MathUtils.clamp(torso.yaw * w, -0.8, 0.8), alpha);
-    lerpBone(bone, "x", THREE.MathUtils.clamp(torso.pitch * w, -0.5, 0.5), alpha);
-    lerpBone(bone, "z", THREE.MathUtils.clamp(-shoulderTilt * w, -0.4, 0.4), alpha);
+
+    const ty = THREE.MathUtils.clamp(yaw * weight, -0.24, 0.24);
+    const tx = THREE.MathUtils.clamp(pitch * weight, -0.15, 0.15);
+    const tz = THREE.MathUtils.clamp(roll * weight, -0.12, 0.12);
+
+    _euler.set(tx, ty, tz, "YXZ");
+    _qa.setFromEuler(_euler);
+    bone.quaternion.slerp(_qa, alpha);
   }
 }
 
-// ======================== Hips ========================
+// ======================== Hips (Quaternion-Based) ========================
 
 export function driveHips(bones, hipRotation, mode, alpha) {
   if (!bones.hips || !hipRotation) return;
 
-  const b = bones.hips;
+  const yaw = -hipRotation.yaw * 0.5;
+  const roll = -hipRotation.roll * 0.5;
+  const pitch = mode === "full" ? hipRotation.pitch * 0.3 : 0;
 
-  lerpBone(b, "y", THREE.MathUtils.clamp(hipRotation.yaw * 0.5, -0.6, 0.6), alpha);
-  lerpBone(b, "z", THREE.MathUtils.clamp(-hipRotation.roll * 0.5, -0.3, 0.3), alpha);
-
-  if (mode === "full") {
-    lerpBone(b, "x", THREE.MathUtils.clamp(hipRotation.pitch * 0.3, -0.4, 0.4), alpha);
-  }
+  // Apply absolute hips rotation safely
+  _euler.set(pitch, yaw, roll, "YXZ");
+  _qa.setFromEuler(_euler);
+  bones.hips.quaternion.slerp(_qa, alpha);
 }
 
-// ======================== Limbs ========================
+// ======================== Limbs (Arms & Legs) ========================
 
 function mpToVRM(p) {
   return _v3a.set(p.x, -p.y, -p.z);
@@ -158,90 +176,83 @@ export function driveLimbs(vrm, bones, rest, body, alpha, debugLog) {
     bone.parent.getWorldQuaternion(_qb);
     _qb.invert().multiply(_qa);
 
-    if (debugLog && (chain.bone === "leftUpperArm" || chain.bone === "rightUpperArm")) {
-      _euler.setFromQuaternion(_qb);
-      console.log(
-        `  ${chain.bone}: t(${target.x.toFixed(2)},${target.y.toFixed(2)},${target.z.toFixed(2)})` +
-        ` e°(${(_euler.x * 57.3).toFixed(0)},${(_euler.y * 57.3).toFixed(0)},${(_euler.z * 57.3).toFixed(0)})`
-      );
-    }
-
     bone.quaternion.slerp(_qb, alpha);
     applied++;
   }
 
-  if (debugLog) console.log(`[Limbs] applied:${applied} mode:${body.mode}`);
+  if (debugLog) console.log(`[Limbs] applied:${applied}`);
 }
 
-// ======================== Fingers ========================
+// ======================== Fingers & Wrists ========================
 
-const FINGER_MAX_ANGLES = {
-  regular: [Math.PI * 0.5, Math.PI * 0.55, Math.PI * 0.45],
-  thumb: [Math.PI * 0.35, Math.PI * 0.4, Math.PI * 0.3],
-};
+const MAX_FINGER_CURL = 1.5; // Max finger bend
+const FINGER_CURL_WEIGHTS = [0.45, 0.35, 0.20]; // Proximal, intermediate, distal distribution
 
-function curlCurve(curl) {
-  return Math.pow(curl, 0.7);
-}
-
-let _fingerLogCount = 0;
-
-export function driveFingers(bones, hands, alpha) {
+export function driveFingers(vrm, bones, rest, hands, alpha) {
   if (!hands) return;
 
-  const shouldLog = _fingerLogCount < 3;
+  vrm.scene.updateMatrixWorld(true);
 
   for (const side of ["left", "right"]) {
     const hand = hands[side];
     if (!hand) continue;
 
+    const isLeft = side === "left";
+
+    // ── 1. Rotate the Wrist (Hand Bone) ──
+    const handBone = bones[`${side}Hand`];
+    const r = rest ? rest[`${side}Hand`] : null;
+
+    if (handBone && r && hand.handForward && hand.palmNormal) {
+      const tFwd = mpToVRM(hand.handForward).clone().normalize();
+      const tNorm = mpToVRM(hand.palmNormal).clone().normalize();
+
+      // Orthonormal basis reconstruction
+      const tBinormal = new THREE.Vector3().crossVectors(tFwd, tNorm).normalize();
+      const tNormOrtho = new THREE.Vector3().crossVectors(tBinormal, tFwd).normalize();
+
+      const M_rest = new THREE.Matrix4().makeBasis(r.binormal, r.norm, r.fwd);
+      const M_tracked = new THREE.Matrix4().makeBasis(tBinormal, tNormOrtho, tFwd);
+
+      const M_delta = M_tracked.clone().multiply(M_rest.invert());
+      const Q_delta = new THREE.Quaternion().setFromRotationMatrix(M_delta);
+
+      const desiredWorld = Q_delta.multiply(r.quat.clone());
+      const parentWorld = new THREE.Quaternion();
+      handBone.parent.getWorldQuaternion(parentWorld);
+      const localTarget = parentWorld.invert().multiply(desiredWorld);
+
+      handBone.quaternion.slerp(localTarget, alpha);
+    }
+
+    // ── 2. Curl Fingers (Standard Humanoid Z-Axis Flexion) ──
     const fingerMap = FINGER_BONES[side];
     if (!fingerMap) continue;
-
-    if (shouldLog) {
-      console.log(
-        `[Fingers] ${side}:`,
-        Object.entries(hand.fingers).map(([k, v]) => `${k}:${v.curl.toFixed(2)}`).join(" ")
-      );
-    }
 
     for (const [fingerName, boneNames] of Object.entries(fingerMap)) {
       const finger = hand.fingers[fingerName];
       if (!finger) continue;
 
-      const isThumb = fingerName === "thumb";
-      const maxAngles = isThumb ? FINGER_MAX_ANGLES.thumb : FINGER_MAX_ANGLES.regular;
-      const adjustedCurl = curlCurve(finger.curl);
+      const curl = Math.pow(finger.curl, 0.75); // Apply curve to make slight movements look responsive
 
       for (let i = 0; i < 3; i++) {
         const bone = bones[boneNames[i]];
         if (!bone) continue;
 
-        const targetAngle = adjustedCurl * maxAngles[i];
-
-        if (isThumb) {
-          if (i === 0) {
-            lerpBone(bone, "z", targetAngle * 0.8, alpha);
-            lerpBone(bone, "x", targetAngle * 0.2, alpha);
-          } else {
-            lerpBone(bone, "z", targetAngle * 0.3, alpha);
-            lerpBone(bone, "x", targetAngle * 0.7, alpha);
-          }
+        if (fingerName === "thumb") {
+          // Thumb opposition and flexion (blends Z and Y axes)
+          const thumbAngle = curl * 0.7;
+          const sign = isLeft ? 1 : -1;
+          lerpBone(bone, "y", thumbAngle * 0.5 * sign, alpha);
+          lerpBone(bone, "z", -thumbAngle * 0.7 * sign, alpha);
         } else {
-          lerpBone(bone, "x", targetAngle, alpha);
-
-          if (i === 0) {
-            const spreadAngle = (1 - adjustedCurl) * 0.1;
-            if (fingerName === "index") {
-              lerpBone(bone, "z", -spreadAngle, alpha);
-            } else if (fingerName === "pinky") {
-              lerpBone(bone, "z", spreadAngle, alpha);
-            }
-          }
+          // Normal fingers flex exclusively along the Z-axis in standard Humanoid bone space.
+          // Left hand bends with -Z, Right hand bends with +Z.
+          const sign = isLeft ? -1 : 1;
+          const targetAngle = curl * MAX_FINGER_CURL * (FINGER_CURL_WEIGHTS[i] / FINGER_CURL_WEIGHTS[0]) * sign;
+          lerpBone(bone, "z", targetAngle, alpha);
         }
       }
     }
-
-    if (shouldLog) _fingerLogCount++;
   }
 }

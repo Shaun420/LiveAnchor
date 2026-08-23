@@ -2,7 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Avatar Overlay MVP | LiveAnchor</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>LiveAnchor</title>
   <link rel="stylesheet" href="style.css" />
 
   <script type="importmap">
@@ -17,69 +21,83 @@
 </head>
 <body>
 
-<div class="app">
+<div class="app" id="app">
+
+  <!-- Main stage: fullscreen on mobile -->
   <div class="stage" id="stage">
     <video id="webcam" autoplay playsinline muted></video>
-    <canvas id="bgCanvas"></canvas>
     <canvas id="overlay"></canvas>
-    <div class="hud">
+
+    <!-- HUD: top bar -->
+    <div class="hud-top">
       <span id="fps">0 FPS</span>
-      <span id="trackingStatus">● No tracking</span>
+      <span id="trackingStatus" class="status-dot">●</span>
+      <span id="modeLabel">--</span>
+    </div>
+
+    <!-- HUD: bottom controls (mobile-friendly tap targets) -->
+    <div class="hud-bottom">
+      <button class="hud-btn" id="startBtn">▶</button>
+      <button class="hud-btn" id="flipBtn" title="Flip Camera">⟳</button>
+      <button class="hud-btn" id="mirrorBtn" title="Mirror">↔</button>
+      <button class="hud-btn" id="recordBtn" title="Record">⏺</button>
+      <button class="hud-btn" id="settingsBtn" title="Settings">⚙</button>
+    </div>
+
+    <!-- Debug overlay (tap to toggle) -->
+    <pre class="debug-overlay" id="debugInfo"></pre>
+  </div>
+
+  <!-- Settings drawer (slides up from bottom) -->
+  <div class="drawer" id="drawer">
+    <div class="drawer-handle"></div>
+
+    <div class="drawer-content">
+      <h2>LiveAnchor</h2>
+
+      <div class="setting-group">
+        <h3>Avatar</h3>
+        <label class="file-btn">
+          Upload VRM
+          <input type="file" id="vrmInput" accept=".vrm" hidden />
+        </label>
+        <button class="btn" id="calibrateBtn">Calibrate Neutral</button>
+      </div>
+
+      <div class="setting-group">
+        <h3>Tracking</h3>
+        <label class="row-label">
+          <span>Body</span>
+          <input type="checkbox" id="bodyToggle" checked />
+        </label>
+        <label class="row-label">
+          <span>Hands</span>
+          <input type="checkbox" id="handsToggle" checked />
+        </label>
+        <label class="col-label">
+          <span>Smoothing</span>
+          <input type="range" id="smoothSlider" min="0" max="100" value="50" />
+        </label>
+      </div>
+
+      <div class="setting-group">
+        <h3>Debug</h3>
+        <label class="row-label">
+          <span>Show Debug</span>
+          <input type="checkbox" id="debugToggle" />
+        </label>
+      </div>
+
+      <div class="setting-group">
+        <h3>Output</h3>
+        <button class="btn" id="streamBtn">📡 Start WebRTC</button>
+        <span class="hint" id="streamHint">Stream avatar to desktop OBS</span>
+      </div>
     </div>
   </div>
 
-  <div class="panel" id="panel">
-    <h2>LiveAnchor</h2>
-    <p class="subtitle">Real-time Avatar Overlay</p>
-
-    <div class="section">
-      <h3>Camera</h3>
-      <button id="startBtn" class="btn primary">Start Camera</button>
-      <label class="toggle">
-        <input type="checkbox" id="mirrorToggle" checked />
-        <span>Mirror</span>
-      </label>
-    </div>
-
-    <div class="section">
-      <h3>Avatar</h3>
-      <label class="file-btn">
-        Upload VRM
-        <input type="file" id="vrmInput" accept=".vrm" hidden />
-      </label>
-      <button id="calibrateBtn" class="btn">Calibrate Neutral</button>
-    </div>
-
-    <div class="section">
-      <h3>Tracking</h3>
-      <label class="toggle">
-        <input type="checkbox" id="bodyToggle" checked />
-        <span>Body Tracking</span>
-      </label>
-      <label class="toggle">
-        <input type="checkbox" id="bgToggle" />
-        <span>Remove Background</span>
-      </label>
-      <label class="slider-label">
-        Smoothing
-        <input type="range" id="smoothSlider" min="0" max="100" value="50" />
-      </label>
-    </div>
-
-    <div class="section">
-      <h3>Recording</h3>
-      <button id="recordBtn" class="btn record">● Record</button>
-      <span id="recordStatus" class="record-status"></span>
-    </div>
-
-    <div class="section debug" id="debugSection">
-      <h3>Debug</h3>
-      <pre id="debugInfo">Waiting for camera...</pre>
-    </div>
-  </div>
 </div>
 
 <script src="app.js" type="module"></script>
-
 </body>
 </html>

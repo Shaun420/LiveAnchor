@@ -1,92 +1,130 @@
+// Import from the local copy of the vision bundle
 import {
   FaceLandmarker,
   PoseLandmarker,
   HandLandmarker,
   FilesetResolver,
-} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/vision_bundle.mjs";
+} from "./wasm/vision_bundle.js";
 
 import { extractFace, extractBlendshapes } from "./face.js";
 import { extractFullBody } from "./body.js";
-import { extractHand, logHandData } from "./hands.js";
-import { initSegmenter, segmentFrame, isSegmenterReady } from "./segmenter.js";
+import { extractHand } from "./hands.js";
+import { FilterPipeline } from "../filters/index.js";
+
+const PRESETS = {
+  low: {
+    numFaces: 1,
+    poseModel: "pose_landmarker_lite.task", // Local file name
+    numHands: 0,
+    label: "low (desktop/weak GPU)",
+  },
+  medium: {
+    numFaces: 1,
+    poseModel: "pose_landmarker_full.task", // Local file name
+    numHands: 2,
+    label: "medium (good GPU)",
+  },
+  high: {
+    numFaces: 4,
+    poseModel: "pose_landmarker_full.task", // Local file name
+    numHands: 2,
+    label: "high (phone/powerful GPU)",
+  },
+};
+
+function detectPreset() {
+  const canvas = document.createElement("canvas");
+  const gl = canvas.getContext("webgl2") || canvas.getContext("webgl");
+  if (!gl) return "low";
+
+  const renderer = gl.getParameter(gl.RENDERER) || "";
+  const vendor = gl.getParameter(gl.VENDOR) || "";
+  const info = (renderer + " " + vendor).toLowerCase();
+
+  console.log("[Tracker] GPU Detected:", renderer);
+
+  const isMobileGPU = /adreno|mali|powervr|apple gpu|img/.test(info);
+  const isWeakGPU = /hd 3|hd 4|intel.*hd|radeon.*hd|gma|mesa/.test(info);
+
+  if (isMobileGPU) return "medium"; 
+  if (isWeakGPU) return "low";
+  return "medium";
+}
 
 export class Tracker {
-  constructor() {
+  constructor(presetOverride) {
     this.faceLandmarker = null;
     this.poseLandmarker = null;
     this.handLandmarker = null;
     this.ready = false;
+    this.preset = null;
 
     this.calibration = { yaw: 0, pitch: 0, roll: 0, x: 0, y: 0 };
     this.enableBody = true;
     this.enableHands = true;
-    this.enablePrivacy = true;
-    this.smoothing = 0.5;
     this.visibilityThreshold = 0.3;
 
-    // Segmentation runs every N frames to save performance
-    this.segSkipFrames = 2;
-    this._segFrameCount = 0;
-    this._lastMask = null;
+    this.filters = new FilterPipeline();
 
-    this.prevFace = null;
-    this.prevBody = null;
-    this._loggedHands = false;
+    this._presetOverride = presetOverride || null;
+    this._lastTs = null;
+    this._fpsBuffer = [];
+    this._initTime = 0;
   }
 
   async init() {
-    const vision = await FilesetResolver.forVisionTasks(
-      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/wasm"
-    );
+    this._initTime = performance.now();
 
+    const presetKey = this._presetOverride || detectPreset();
+    this.preset = PRESETS[presetKey];
+    console.log(`[Tracker] Performance Preset: ${presetKey} — ${this.preset.label}`);
+
+    // Resolve WebAssembly assets from local directory
+    const vision = await FilesetResolver.forVisionTasks("./tracker/wasm");
+
+    // Face Landmarker (Local file)
     this.faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
       baseOptions: {
-        modelAssetPath:
-          "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+        modelAssetPath: "./models/face_landmarker.task",
         delegate: "GPU",
       },
       outputFaceBlendshapes: true,
       outputFacialTransformationMatrixes: true,
       runningMode: "VIDEO",
-      numFaces: 4,
+      numFaces: this.preset.numFaces,
     });
 
+    // Pose Landmarker (Local file based on preset)
     this.poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
       baseOptions: {
-        modelAssetPath:
-          "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
+        modelAssetPath: `./models/${this.preset.poseModel}`,
         delegate: "GPU",
       },
       runningMode: "VIDEO",
       numPoses: 1,
     });
 
-    if (this.enableHands) {
+    // Hand Landmarker (Local file)
+    if (this.preset.numHands > 0) {
       this.handLandmarker = await HandLandmarker.createFromOptions(vision, {
         baseOptions: {
-          modelAssetPath:
-            "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+          modelAssetPath: "./models/hand_landmarker.task",
           delegate: "GPU",
         },
         runningMode: "VIDEO",
-        numHands: 2,
+        numHands: this.preset.numHands,
       });
+    } else {
+      this.enableHands = false;
     }
 
-    // Segmenter for privacy mask
-    if (this.enablePrivacy) {
-      try {
-        await initSegmenter();
-        console.log("[Tracker] Segmenter ready");
-      } catch (err) {
-        console.warn("[Tracker] Segmenter failed:", err.message);
-      }
-    }
-
+    const elapsed = ((performance.now() - this._initTime) / 1000).toFixed(1);
     this.ready = true;
-    console.log("[Tracker] Init: face(4) + pose_full" +
-      (this.handLandmarker ? " + hands" : "") +
-      (isSegmenterReady() ? " + segmenter" : "")
+
+    console.log(
+      `[Tracker] Offline Initialization Complete in ${elapsed}s: ` +
+      `face(${this.preset.numFaces}) + ${this.preset.poseModel}` +
+      (this.handLandmarker ? ` + hands(${this.preset.numHands})` : "")
     );
   }
 
@@ -98,9 +136,13 @@ export class Tracker {
     };
   }
 
+  setSmoothing(val) {
+    this.filters.setSmoothing(val);
+  }
+
   _pickBestFace(faceRes) {
     const all = faceRes.faceLandmarks;
-    if (!all || all.length === 0) return -1;
+    if (!all?.length) return -1;
     if (all.length === 1) return 0;
 
     let bestIdx = 0, bestScore = -Infinity;
@@ -119,144 +161,68 @@ export class Tracker {
   process(video, timestamp) {
     if (!this.ready || !video.videoWidth) return null;
 
+    const ts = timestamp / 1000;
+    if (this._lastTs !== null) {
+      const dt = ts - this._lastTs;
+      if (dt > 0 && dt < 0.5) {
+        this._fpsBuffer.push(1 / dt);
+        if (this._fpsBuffer.length > 30) this._fpsBuffer.shift();
+        const avgFps = this._fpsBuffer.reduce((a, b) => a + b, 0) / this._fpsBuffer.length;
+        this.filters.setFrequency(avgFps);
+      }
+    }
+    this._lastTs = ts;
+
     const result = {
       face: null, body: null, blendshapes: null,
-      hands: null, facesDetected: 0, mask: null,
+      hands: null, facesDetected: 0,
     };
 
-    // --- Face ---
     const faceRes = this.faceLandmarker.detectForVideo(video, timestamp);
     result.facesDetected = faceRes.faceLandmarks?.length || 0;
 
     const bestIdx = this._pickBestFace(faceRes);
     if (bestIdx >= 0) {
-      result.face = extractFace(
+      const rawFace = extractFace(
         faceRes.faceLandmarks[bestIdx],
         faceRes.faceWorldLandmarks?.[bestIdx] || null,
         video,
         this.calibration
       );
+      result.face = this.filters.filterFace(rawFace, ts);
+
       if (faceRes.faceBlendshapes?.[bestIdx]) {
         result.blendshapes = extractBlendshapes(faceRes.faceBlendshapes[bestIdx]);
       }
     }
 
-    // --- Pose ---
     if (this.enableBody) {
       const poseRes = this.poseLandmarker.detectForVideo(video, timestamp);
       if (poseRes.landmarks?.length > 0) {
-        result.body = extractFullBody(
+        const rawBody = extractFullBody(
           poseRes.landmarks[0],
           poseRes.worldLandmarks?.[0] || null,
           video,
           this.visibilityThreshold
         );
+        result.body = this.filters.filterBody(rawBody, ts);
       }
     }
 
-    // --- Hands ---
-    if (this.handLandmarker && this.enableHands) {
+    if (this.enableHands && this.handLandmarker) {
       const handRes = this.handLandmarker.detectForVideo(video, timestamp);
       if (handRes.landmarks?.length > 0) {
-        result.hands = {};
+        const rawHands = {};
         for (let i = 0; i < handRes.landmarks.length; i++) {
-          const handedness = handRes.handedness?.[i]?.[0]?.categoryName || (i === 0 ? "Left" : "Right");
+          const handedness = handRes.handedness?.[i]?.[0]?.categoryName || "Left";
           const worldLm = handRes.worldLandmarks?.[i] || null;
           const hand = extractHand(handRes.landmarks[i], worldLm, handedness);
-          if (hand) {
-            const key = handedness === "Left" ? "left" : "right";
-            result.hands[key] = hand;
-            if (!this._loggedHands) logHandData(hand, key);
-          }
+          if (hand) rawHands[handedness === "Left" ? "left" : "right"] = hand;
         }
-        if (!this._loggedHands && Object.keys(result.hands).length > 0) {
-          this._loggedHands = true;
-        }
+        result.hands = this.filters.filterHands(rawHands, ts);
       }
     }
-
-    // --- Segmentation (throttled) ---
-    if (isSegmenterReady() && this.enablePrivacy) {
-      this._segFrameCount++;
-      if (this._segFrameCount >= this.segSkipFrames) {
-        this._segFrameCount = 0;
-        this._lastMask = segmentFrame(video, timestamp);
-      }
-      result.mask = this._lastMask;
-    }
-
-    // Smoothing
-    if (result.face) result.face = this._smoothFace(result.face);
-    if (result.body) result.body = this._smoothBody(result.body);
 
     return result;
-  }
-
-  _smoothFace(f) {
-    if (!this.prevFace) { this.prevFace = { ...f }; return f; }
-    const a = 0.15 + (1 - this.smoothing) * 0.6;
-    const l = (p, n) => p + (n - p) * a;
-    const s = {
-      x: l(this.prevFace.x, f.x), y: l(this.prevFace.y, f.y),
-      xNorm: l(this.prevFace.xNorm, f.xNorm), yNorm: l(this.prevFace.yNorm, f.yNorm),
-      eyeDistance: l(this.prevFace.eyeDistance, f.eyeDistance),
-      eyeDistanceNorm: l(this.prevFace.eyeDistanceNorm, f.eyeDistanceNorm),
-      yaw: l(this.prevFace.yaw, f.yaw), pitch: l(this.prevFace.pitch, f.pitch),
-      roll: l(this.prevFace.roll, f.roll), mouthOpen: l(this.prevFace.mouthOpen, f.mouthOpen),
-      confidence: f.confidence, gaze: f.gaze,
-    };
-    this.prevFace = s;
-    return s;
-  }
-
-  _smoothBody(b) {
-    if (!this.prevBody) { this.prevBody = this._cloneBody(b); return b; }
-    const a = 0.25 + (1 - this.smoothing) * 0.5;
-    const l = (p, n) => p + (n - p) * a;
-    const ld = (pd, nd) => (!pd || !nd) ? nd : ({ x: l(pd.x, nd.x), y: l(pd.y, nd.y), z: l(pd.z, nd.z) });
-    const p = this.prevBody;
-
-    const s = {
-      ...b,
-      shoulderMidX: l(p.shoulderMidX, b.shoulderMidX),
-      shoulderMidY: l(p.shoulderMidY, b.shoulderMidY),
-      shoulderMidXNorm: l(p.shoulderMidXNorm, b.shoulderMidXNorm),
-      shoulderMidYNorm: l(p.shoulderMidYNorm, b.shoulderMidYNorm),
-      shoulderWidth: l(p.shoulderWidth, b.shoulderWidth),
-      shoulderWidthNorm: l(p.shoulderWidthNorm, b.shoulderWidthNorm),
-      shoulderTilt: l(p.shoulderTilt, b.shoulderTilt),
-      hipTilt: l(p.hipTilt || 0, b.hipTilt || 0),
-    };
-
-    if (b.torso && p.torso) {
-      s.torso = { ...b.torso, yaw: l(p.torso.yaw, b.torso.yaw), pitch: l(p.torso.pitch, b.torso.pitch), roll: l(p.torso.roll, b.torso.roll) };
-    }
-
-    if (b.rotations && p.rotations) {
-      s.rotations = { ...b.rotations };
-      for (const k of ["leftElbowAngle", "rightElbowAngle", "leftKneeAngle", "rightKneeAngle"]) {
-        if (b.rotations[k] !== undefined && p.rotations[k] !== undefined) {
-          s.rotations[k] = l(p.rotations[k], b.rotations[k]);
-        }
-      }
-      for (const k of ["leftUpperArmDir", "leftLowerArmDir", "rightUpperArmDir", "rightLowerArmDir",
-                        "leftUpperLegDir", "leftLowerLegDir", "rightUpperLegDir", "rightLowerLegDir"]) {
-        if (b.rotations[k]) s.rotations[k] = ld(p.rotations[k], b.rotations[k]);
-      }
-    }
-
-    this.prevBody = this._cloneBody(s);
-    return s;
-  }
-
-  _cloneBody(b) {
-    return {
-      shoulderMidX: b.shoulderMidX, shoulderMidY: b.shoulderMidY,
-      shoulderMidXNorm: b.shoulderMidXNorm, shoulderMidYNorm: b.shoulderMidYNorm,
-      shoulderWidth: b.shoulderWidth, shoulderWidthNorm: b.shoulderWidthNorm,
-      shoulderTilt: b.shoulderTilt, hipTilt: b.hipTilt,
-      torso: b.torso ? { ...b.torso } : null,
-      rotations: b.rotations ? { ...b.rotations } : null,
-    };
   }
 }

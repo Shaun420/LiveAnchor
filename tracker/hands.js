@@ -1,13 +1,5 @@
 import { HAND } from "./constants.js";
 
-// ============================================================
-// Extract hand landmarks into a structured format
-//
-// Each finger has 4 joints: MCP, PIP, DIP, TIP
-// We compute the curl angle for each finger (how bent it is)
-// and the spread angle between fingers.
-// ============================================================
-
 function angle3d(a, b, c) {
   const ba = { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z };
   const bc = { x: c.x - b.x, y: c.y - b.y, z: c.z - b.z };
@@ -21,19 +13,28 @@ function dir(a, b) {
   return { x: b.x - a.x, y: b.y - a.y, z: b.z - a.z };
 }
 
-// Finger curl: 0 = straight, 1 = fully bent
+function normalize(v) {
+  const len = Math.hypot(v.x, v.y, v.z) || 1;
+  return { x: v.x / len, y: v.y / len, z: v.z / len };
+}
+
+function cross(a, b) {
+  return {
+    x: a.y * b.z - a.z * b.y,
+    y: a.z * b.x - a.x * b.z,
+    z: a.x * b.y - a.y * b.x,
+  };
+}
+
+// Finger curl calculation: 0 = straight, 1 = fully curled fist
 function fingerCurl(wrist, mcp, pip, dip, tip) {
-  // Angle at PIP joint (main bend)
   const pipAngle = angle3d(mcp, pip, dip);
-  // Angle at DIP joint
   const dipAngle = angle3d(pip, dip, tip);
-  // Angle at MCP (knuckle)
   const mcpAngle = angle3d(wrist, mcp, pip);
 
-  // Combine: straight = π at each joint
-  const avgAngle = (pipAngle + dipAngle + mcpAngle) / 3;
-  // π = straight (curl=0), 0 = fully bent (curl=1)
-  return 1 - avgAngle / Math.PI;
+  // π (180°) is straight (curl = 0), smaller angle = bent (curl = 1)
+  const avg = (pipAngle + dipAngle + mcpAngle) / 3;
+  return Math.max(0, Math.min(1, 1 - avg / Math.PI));
 }
 
 export function extractHand(landmarks, worldLandmarks, handedness) {
@@ -50,101 +51,58 @@ export function extractHand(landmarks, worldLandmarks, handedness) {
   };
 
   const wrist = get(HAND.WRIST);
+  const indexMcp = get(HAND.INDEX_MCP);
+  const middleMcp = get(HAND.MIDDLE_MCP);
+  const pinkyMcp = get(HAND.PINKY_MCP);
 
-  // Per-finger data
+  // --- Hand 3D Orientation Vectors ---
+  // 1. Forward direction (from wrist pointing towards knuckles)
+  const handForward = normalize(dir(wrist, middleMcp));
+
+  // 2. Across knuckles vector
+  const handAcross = normalize(dir(indexMcp, pinkyMcp));
+
+  // 3. Palm normal (pointing out from palm)
+  let palmNormal = normalize(cross(handForward, handAcross));
+  if (handedness === "Left") {
+    // Invert normal for left hand chirality
+    palmNormal = { x: -palmNormal.x, y: -palmNormal.y, z: -palmNormal.z };
+  }
+
+  // --- Finger Curls ---
   const fingers = {
     thumb: {
-      curl: fingerCurl(
-        wrist,
-        get(HAND.THUMB_CMC),
-        get(HAND.THUMB_MCP),
-        get(HAND.THUMB_IP),
-        get(HAND.THUMB_TIP)
-      ),
-      dir: dir(get(HAND.THUMB_MCP), get(HAND.THUMB_TIP)),
-      joints: [get(HAND.THUMB_CMC), get(HAND.THUMB_MCP), get(HAND.THUMB_IP), get(HAND.THUMB_TIP)],
+      curl: fingerCurl(wrist, get(HAND.THUMB_CMC), get(HAND.THUMB_MCP), get(HAND.THUMB_IP), get(HAND.THUMB_TIP)),
     },
     index: {
-      curl: fingerCurl(wrist, get(HAND.INDEX_MCP), get(HAND.INDEX_PIP), get(HAND.INDEX_DIP), get(HAND.INDEX_TIP)),
-      dir: dir(get(HAND.INDEX_MCP), get(HAND.INDEX_TIP)),
-      joints: [get(HAND.INDEX_MCP), get(HAND.INDEX_PIP), get(HAND.INDEX_DIP), get(HAND.INDEX_TIP)],
+      curl: fingerCurl(wrist, indexMcp, get(HAND.INDEX_PIP), get(HAND.INDEX_DIP), get(HAND.INDEX_TIP)),
     },
     middle: {
-      curl: fingerCurl(wrist, get(HAND.MIDDLE_MCP), get(HAND.MIDDLE_PIP), get(HAND.MIDDLE_DIP), get(HAND.MIDDLE_TIP)),
-      dir: dir(get(HAND.MIDDLE_MCP), get(HAND.MIDDLE_TIP)),
-      joints: [get(HAND.MIDDLE_MCP), get(HAND.MIDDLE_PIP), get(HAND.MIDDLE_DIP), get(HAND.MIDDLE_TIP)],
+      curl: fingerCurl(wrist, middleMcp, get(HAND.MIDDLE_PIP), get(HAND.MIDDLE_DIP), get(HAND.MIDDLE_TIP)),
     },
     ring: {
       curl: fingerCurl(wrist, get(HAND.RING_MCP), get(HAND.RING_PIP), get(HAND.RING_DIP), get(HAND.RING_TIP)),
-      dir: dir(get(HAND.RING_MCP), get(HAND.RING_TIP)),
-      joints: [get(HAND.RING_MCP), get(HAND.RING_PIP), get(HAND.RING_DIP), get(HAND.RING_TIP)],
     },
     pinky: {
-      curl: fingerCurl(wrist, get(HAND.PINKY_MCP), get(HAND.PINKY_PIP), get(HAND.PINKY_DIP), get(HAND.PINKY_TIP)),
-      dir: dir(get(HAND.PINKY_MCP), get(HAND.PINKY_TIP)),
-      joints: [get(HAND.PINKY_MCP), get(HAND.PINKY_PIP), get(HAND.PINKY_DIP), get(HAND.PINKY_TIP)],
+      curl: fingerCurl(wrist, pinkyMcp, get(HAND.PINKY_PIP), get(HAND.PINKY_DIP), get(HAND.PINKY_TIP)),
     },
   };
-
-  // Finger spread: angle between adjacent MCP→TIP directions
-  const spreadAngle = (f1, f2) => {
-    const d1 = f1.dir, d2 = f2.dir;
-    const dot = d1.x * d2.x + d1.y * d2.y + d1.z * d2.z;
-    const m1 = Math.hypot(d1.x, d1.y, d1.z) || 1;
-    const m2 = Math.hypot(d2.x, d2.y, d2.z) || 1;
-    return Math.acos(Math.max(-1, Math.min(1, dot / (m1 * m2))));
-  };
-
-  const spread = {
-    thumbIndex: spreadAngle(fingers.thumb, fingers.index),
-    indexMiddle: spreadAngle(fingers.index, fingers.middle),
-    middleRing: spreadAngle(fingers.middle, fingers.ring),
-    ringPinky: spreadAngle(fingers.ring, fingers.pinky),
-  };
-
-  // Wrist rotation: palm normal direction
-  const palmNormal = computePalmNormal(
-    get(HAND.WRIST),
-    get(HAND.INDEX_MCP),
-    get(HAND.PINKY_MCP)
-  );
 
   return {
     handedness, // "Left" or "Right"
     wrist,
-    fingers,
-    spread,
+    handForward,
     palmNormal,
+    fingers,
     worldSpace: use3d,
   };
 }
 
-function computePalmNormal(wrist, indexMcp, pinkyMcp) {
-  // Two vectors on the palm plane
-  const v1 = dir(wrist, indexMcp);
-  const v2 = dir(wrist, pinkyMcp);
-
-  // Cross product = palm normal
-  return {
-    x: v1.y * v2.z - v1.z * v2.y,
-    y: v1.z * v2.x - v1.x * v2.z,
-    z: v1.x * v2.y - v1.y * v2.x,
-  };
-}
-
 export function logHandData(hand, label) {
-  if (!hand) { console.log(`[Hand] ${label}: null`); return; }
-  console.log(`=== HAND: ${label} (${hand.handedness}) ===`);
+  if (!hand) return;
   const f = hand.fingers;
   console.log(
-    `curl: thumb:${f.thumb.curl.toFixed(2)} index:${f.index.curl.toFixed(2)}`,
-    `mid:${f.middle.curl.toFixed(2)} ring:${f.ring.curl.toFixed(2)} pinky:${f.pinky.curl.toFixed(2)}`
+    `[Hand: ${label}] Forward:(${hand.handForward.x.toFixed(2)},${hand.handForward.y.toFixed(2)},${hand.handForward.z.toFixed(2)}) ` +
+    `Curls: T:${f.thumb.curl.toFixed(2)} I:${f.index.curl.toFixed(2)} M:${f.middle.curl.toFixed(2)} R:${f.ring.curl.toFixed(2)} P:${f.pinky.curl.toFixed(2)}`
   );
-  console.log(
-    `spread: TI:${(hand.spread.thumbIndex * 57.3).toFixed(0)}°`,
-    `IM:${(hand.spread.indexMiddle * 57.3).toFixed(0)}°`,
-    `MR:${(hand.spread.middleRing * 57.3).toFixed(0)}°`,
-    `RP:${(hand.spread.ringPinky * 57.3).toFixed(0)}°`
-  );
-  console.log("========================");
 }

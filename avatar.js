@@ -71,7 +71,7 @@ export class AvatarController {
 
     // Config
     this.sizeMultiplier = 0.4;
-    this.verticalOffset = 0.05;
+    this.verticalOffset = 0.15;
     this.yawScaleCompensation = 0.9;
     this.minYawCos = 0.7;
     this.shoulderScaleWeight = 0.7;
