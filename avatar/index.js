@@ -3,9 +3,11 @@ import { VRMUtils } from "@pixiv/three-vrm";
 import { _euler } from "./constants.js";
 import { loadVRM, measureModel } from "./loader.js";
 import { findAllBones, captureRestPose } from "./bones.js";
-import { driveHead, driveEyes, driveTorso, driveHips, driveLimbs, driveFingers } from "./drivers.js";
+import { driveHead, driveEyes, driveTorso, driveHips, driveLimbs, driveFingers, lerpBone } from "./drivers.js";
 import { driveExpressions } from "./expressions.js";
 import { computeTarget } from "./target.js";
+import { solveArmIK, applyFingerPose, ANCHORS, GESTURE_POSES, GRIP_POSE } from "./overrides.js";
+import { PropManager } from "./props.js";
 
 export class AvatarController {
   constructor(canvas) {
@@ -25,6 +27,28 @@ export class AvatarController {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(w, h, false);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+    // CRITICAL FIX: Handle WebGL context loss on mobile devices
+    // If GPU runs out of memory (common with ONNX WebGPU + MediaPipe + Three.js),
+    // the browser silently loses the context. We pause the loop and alert the user.
+    this.renderer.domElement.addEventListener('webglcontextlost', (event) => {
+      event.preventDefault(); // Prevent the default "reload page" alert
+      console.error("[Avatar] WebGL Context Lost! GPU memory exhausted. Pausing rendering.");
+      cancelAnimationFrame(this._animateId || 0);
+      // Optionally show a UI overlay to the user
+      this.renderer.domElement.style.display = 'none';
+    }, false);
+
+    this.renderer.domElement.addEventListener('webglcontextrestored', () => {
+      console.log("[Avatar] WebGL Context Restored. Resuming rendering.");
+      this.renderer.domElement.style.display = '';
+      // Resume the animation loop if it was paused
+      if (this._animateId) {
+        this.animate();
+      }
+    }, false);
+
+    this.props = new PropManager();
 
     this.scene.add(new THREE.AmbientLight(0xffffff, 1.0));
     const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
@@ -76,6 +100,14 @@ export class AvatarController {
     this.hasHipBone = false;
     this._loggedFeatures = false;
     this._lastModeLog = "";
+
+    // ==========================================
+    // AI DIRECTOR STATE (Semantic Overrides)
+    // ==========================================
+    this.handOverrides = { left: null, right: null };
+    this.activeGestures = { left: null, right: null };
+    this.currentEmotion = null;
+    this.emotionIntensity = 1.0;
   }
 
   get response() { return this.config.response; }
@@ -129,6 +161,62 @@ export class AvatarController {
 
     console.log("[Avatar] VRM loaded.");
   }
+
+  // ==========================================
+  // AI DIRECTOR SEMANTIC OVERRIDES
+  // ==========================================
+
+  setEmotion(emotion, intensity = 1.0) {
+    this.currentEmotion = emotion;
+    this.emotionIntensity = intensity;
+    
+    if (this.vrm?.expressionManager) {
+      // Reset standard emotions
+      const emotions = ['happy', 'angry', 'sad', 'relaxed', 'surprised'];
+      emotions.forEach(name => {
+        if (this.vrm.expressionManager.getExpression(name)) {
+          this.vrm.expressionManager.setValue(name, 0.0);
+        }
+      });
+
+      // Map AI emotion names to VRM blendshape names
+      const map = { 
+        joy: 'happy', 
+        anger: 'angry', 
+        sorrow: 'sad', 
+        surprise: 'surprised', 
+        focus: 'relaxed' 
+      };
+      
+      const target = map[emotion];
+      if (target && this.vrm.expressionManager.getExpression(target)) {
+        this.vrm.expressionManager.setValue(target, intensity);
+      }
+    }
+  }
+
+  triggerGesture(gesture, hand) {
+    const hands = hand === "both" ? ["left", "right"] : [hand];
+    hands.forEach(h => {
+      this.activeGestures[h] = gesture;
+      clearTimeout(this[`_ges_${h}`]);
+      this[`_ges_${h}`] = setTimeout(() => { this.activeGestures[h] = null; }, 3000);
+    });
+    console.log(`[Avatar] Gesture Override: ${gesture} on ${hand}`);
+  }
+
+  setHandIKTarget(hand, target) {
+    this.handOverrides[hand] = (target === "release") ? null : target;
+    console.log(`[Avatar] IK Override: ${hand} → ${target}`);
+  }
+
+  spawnProp(name, hand) {
+    this.props.spawn(name, hand, this.bones);
+  }
+
+  // ==========================================
+  // MAIN UPDATE LOOP
+  // ==========================================
 
   update(data, dt = 1 / 60) {
     let face = data?.face || null;
@@ -190,9 +278,11 @@ export class AvatarController {
     driveLimbs(this.vrm, this.bones, this.rest, body, a, limbLog);
     this._fc++;
 
-    // Fingers
+    // Fingers & Hands
     if (this.hasFingerBones && hands) {
+      // TODO: If this.handOverrides.left/right is active, bypass MediaPipe and apply IK/Gesture
       driveFingers(this.vrm, this.bones, this.rest, hands, a);
+      this._applySemanticOverrides(a);
     }
 
     // One-time feature log
@@ -227,6 +317,22 @@ export class AvatarController {
     console.log("[Avatar] Resized:", w, "x", h);
   }
 
+  _applySemanticOverrides(alpha) {
+    for (const side of ["left", "right"]) {
+      const ik = this.handOverrides[side];
+      const ges = this.activeGestures[side];
+      const gripping = this.props.isHolding(side) || (ik && (ik === "chest" || ik === "hip"));
+
+      // 1. Arm IK (occlusion recovery / holding steady) — overrides driveLimbs output
+      if (ik && ANCHORS[side][ik]) {
+        solveArmIK(this, side, ANCHORS[side][ik], alpha);
+      }
+
+      // 2. Fingers: procedural grip > gesture > (MediaPipe already applied)
+      if (gripping)      applyFingerPose(this.bones, side, GRIP_POSE, lerpBone, alpha);
+      else if (ges)      applyFingerPose(this.bones, side, GESTURE_POSES[ges] || GESTURE_POSES.open_palm, lerpBone, alpha);
+    }
+  }
   setTestMode(m) { this.testMode = m; }
   toggleDebugBox(v) { this.debugBox.visible = v; }
   toggleAnchorMarker(v) { this.anchorMarker.visible = v; }

@@ -1,0 +1,20 @@
+{
+  "name": "liveanchor-god-tier",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0",
+    "vitest": "^1.0.0"
+  },
+  "dependencies": {
+    "three": "^0.160.0",
+    "@pixiv/three-vrm": "^2.0.0",
+    "onnxruntime-web": "^1.17.0"
+  }
+}

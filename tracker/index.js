@@ -1,3 +1,13 @@
+/**
+ * Modified tracker/index.js — Enhanced with optional PoseLifter ONNX integration
+ * 
+ * Key Changes:
+ * - Added PoseLifter import and optional initialization
+ * - process() now returns both filtered MediaPipe data AND ONNX 3D data
+ * - New setPoseLifterEnabled() method to toggle the ONNX path
+ * - Buffer management integrated with existing filter pipeline
+ */
+
 // Import from the local copy of the vision bundle
 import {
   FaceLandmarker,
@@ -10,6 +20,7 @@ import { extractFace, extractBlendshapes } from "./face.js";
 import { extractFullBody } from "./body.js";
 import { extractHand } from "./hands.js";
 import { FilterPipeline } from "../filters/index.js";
+import { PoseLifter } from "../app/poseLifter.js"; // NEW: ONNX 3D lifter (moved to app/)
 
 const PRESETS = {
   low: {
@@ -30,6 +41,13 @@ const PRESETS = {
     numHands: 2,
     label: "high (phone/powerful GPU)",
   },
+  // NEW: videoPose3d preset — uses ONNX for 3D lifting
+  videoPose3d: {
+    numFaces: 1,
+    poseModel: "pose_landmarker_full.task",
+    numHands: 2,
+    label: "videoPose3d (ONNX 3D lifting)",
+  },
 };
 
 function detectPreset() {
@@ -46,7 +64,7 @@ function detectPreset() {
   const isMobileGPU = /adreno|mali|powervr|apple gpu|img/.test(info);
   const isWeakGPU = /hd 3|hd 4|intel.*hd|radeon.*hd|gma|mesa/.test(info);
 
-  if (isMobileGPU) return "medium"; 
+  if (isMobileGPU) return "medium";
   if (isWeakGPU) return "low";
   return "medium";
 }
@@ -65,6 +83,7 @@ export class Tracker {
     this.visibilityThreshold = 0.3;
 
     this.filters = new FilterPipeline();
+    this.poseLifter = null; // NEW: ONNX 3D lifter instance
 
     this._presetOverride = presetOverride || null;
     this._lastTs = null;
@@ -118,26 +137,58 @@ export class Tracker {
       this.enableHands = false;
     }
 
+    // NEW: Initialize PoseLifter (ONNX 3D lifting)
+    // Only initialize if not explicitly disabled; auto-detect based on preset
+    if (presetKey === "videoPose3d") {
+      try {
+        this.poseLifter = new PoseLifter();
+        await this.poseLifter.init();
+        console.log("[PoseLifter] ONNX 3D lifting enabled");
+      } catch (err) {
+        console.warn("[PoseLifter] Could not initialize ONNX, continuing without 3D lifting:", err.message);
+        this.poseLifter = null;
+      }
+    }
+
     const elapsed = ((performance.now() - this._initTime) / 1000).toFixed(1);
     this.ready = true;
 
     console.log(
       `[Tracker] Offline Initialization Complete in ${elapsed}s: ` +
-      `face(${this.preset.numFaces}) + ${this.preset.poseModel}` +
-      (this.handLandmarker ? ` + hands(${this.preset.numHands})` : "")
+        `face(${this.preset.numFaces}) + ${this.preset.poseModel}` +
+        (this.handLandmarker ? ` + hands(${this.preset.numHands})` : "")
     );
   }
 
   calibrate(anchor) {
     if (!anchor) return;
     this.calibration = {
-      yaw: anchor.yaw, pitch: anchor.pitch, roll: anchor.roll,
-      x: anchor.x, y: anchor.y,
+      yaw: anchor.yaw,
+      pitch: anchor.pitch,
+      roll: anchor.roll,
+      x: anchor.x,
+      y: anchor.y,
     };
   }
 
   setSmoothing(val) {
     this.filters.setSmoothing(val);
+  }
+
+  setPoseLifterEnabled(enabled) {
+    // Toggle ONNX 3D lifting on/off after init
+    if (enabled && !this.poseLifter) {
+      try {
+        this.poseLifter = new PoseLifter();
+        // Note: full init would need model path; for now just mark as available
+        console.log("[PoseLifter] Enabled (model loading deferred)");
+      } catch (err) {
+        console.warn("[PoseLifter] Could not enable:", err.message);
+      }
+    } else if (!enabled && this.poseLifter) {
+      this.poseLifter = null;
+      console.log("[PoseLifter] Disabled");
+    }
   }
 
   _pickBestFace(faceRes) {
@@ -206,6 +257,31 @@ export class Tracker {
           this.visibilityThreshold
         );
         result.body = this.filters.filterBody(rawBody, ts);
+
+        // NEW: Run PoseLifter ONNX 3D lifting if available
+        if (this.poseLifter) {
+          try {
+            // Pass the raw pose landmarks and video element for normalization
+            const lifterResult = this.poseLifter.processFrame(
+              poseRes.landmarks[0], // MediaPipe 33 landmarks
+              video // HTMLVideoElement
+            );
+
+            if (lifterResult.onnx3D) {
+              // Store ONNX 3D data in result for avatar drivers
+              result.body.onnx3dJoints = lifterResult.onnx3D;
+              console.log(`[Tracker] ONNX 3D joints computed: ${lifterResult.onnx3D.length}`);
+            }
+
+            // Also return filtered raw body for immediate avatar use
+            if (lifterResult.rawBody) {
+              // Merge raw body data with filtered data
+              result.body = { ...result.body, ...lifterResult.rawBody };
+            }
+          } catch (err) {
+            console.error("[PoseLifter] processFrame error:", err.message);
+          }
+        }
       }
     }
 
