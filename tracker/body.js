@@ -200,25 +200,28 @@ export function extractFullBody(poseLandmarks, poseWorldLandmarks, video, visThr
   const hipRotation = hasHips ? computeHipRotation(j3) : null;
 
   return {
-    joints2d: j2,
-    joints3d: j3,
-    rotations,
-    torso,
-    hipRotation,
-    mode,
+      joints2d: j2,
+      joints3d: j3,
+      rotations,
+      torso,
+      hipRotation,
+      mode,
 
-    leftShoulder: ls, rightShoulder: rs,
-    shoulderMidX, shoulderMidY,
-    shoulderMidXNorm: shoulderMidX / w,
-    shoulderMidYNorm: shoulderMidY / h,
-    shoulderWidth, shoulderWidthNorm: shoulderWidth / w,
-    shoulderTilt, hipTilt,
+      leftShoulder: ls, rightShoulder: rs,
+      shoulderMidX, shoulderMidY,
+      shoulderMidXNorm: shoulderMidX / w,
+      shoulderMidYNorm: shoulderMidY / h,
+      shoulderWidth, shoulderWidthNorm: shoulderWidth / w,
+      shoulderTilt, hipTilt,
 
-    hasShoulders, hasHips,
-    hasLeftArm, hasRightArm,
-    hasLeftLeg, hasRightLeg,
+      hasShoulders, hasHips,
+      hasLeftArm, hasRightArm,
+      hasLeftLeg, hasRightLeg,
 
-    worldSpace: useWorld,
-    synthesized: false,
-  };
+      worldSpace: useWorld,
+      synthesized: false,
+      // NEW: Include raw landmarks array for ROI cascade
+      landmarks: poseLandmarks,
+      poseLandmarks: poseLandmarks
+    };
 }

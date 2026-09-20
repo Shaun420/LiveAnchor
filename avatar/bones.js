@@ -1,7 +1,6 @@
 import * as THREE from "three";
-import { LIMB_CHAINS, BONE_NAMES } from "./constants.js";
+import { LIMB_CHAINS, BONE_NAMES, FINGER_BONES, _v3a, _v3b, _v3c, _v3d } from "./constants.js";
 
-// Mapping dictionary for legacy or un-normalized VRM/VRoid rigs
 const LEGACY_MAP = {
   hips: ["J_Bip_C_Hips", "bip_hips", "hips"],
   spine: ["J_Bip_C_Spine", "bip_spine", "spine"],
@@ -24,124 +23,107 @@ const LEGACY_MAP = {
   leftFoot: ["J_Bip_L_Foot", "bip_l_foot", "leftFoot"],
   rightFoot: ["J_Bip_R_Foot", "bip_r_foot", "rightFoot"],
   leftEye: ["J_Adj_L_FaceEye", "leftEye"],
-  rightEye: ["J_Adj_R_FaceEye", "rightEye"]
+  rightEye: ["J_Adj_R_FaceEye", "rightEye"],
 };
 
-/**
- * Locate all required VRM humanoid bones in the loaded scene with robust fallback search.
- */
 export function findAllBones(vrm) {
   if (!vrm) return {};
   const h = vrm.humanoid;
   const bones = {};
 
   for (const name of BONE_NAMES) {
-    // 1. Try standard normalized humanoid lookup first (safest)
-    let node = h?.getNormalizedBoneNode(name);
-
-    // 2. Fall back to scene graph search matching standard named patterns
+    let node = h?.getNormalizedBoneNode?.(name) || null;
     if (!node) {
-      const alternatives = LEGACY_MAP[name] || [name];
-      for (const alt of alternatives) {
+      for (const alt of LEGACY_MAP[name] || [name]) {
         node = vrm.scene.getObjectByName(alt);
         if (node) break;
       }
     }
-
-    // 3. Last resort fuzzy search
     if (!node) {
+      const suffix = name.toLowerCase();
       vrm.scene.traverse((child) => {
-        if (!node && child.name && child.name.toLowerCase().endsWith(name.toLowerCase())) {
-          node = child;
-        }
+        if (!node && child.name && child.name.toLowerCase().endsWith(suffix)) node = child;
       });
     }
-
     bones[name] = node || null;
   }
 
-  const found = BONE_NAMES.filter((n) => bones[n]);
-  console.log(`[Avatar] Bones resolved: ${found.length}/${BONE_NAMES.length}`);
+  console.log(`[Avatar] Bones resolved: ${BONE_NAMES.filter((n) => bones[n]).length}/${BONE_NAMES.length}`);
   return bones;
 }
 
-/**
- * Capture the rest-pose (T-Pose) orientations of all limb and hand bones.
- */
+function buildHandBasis(handBone, middleMcp, indexMcp, pinkyMcp, side) {
+  if (!handBone) return null;
+  const w = handBone.getWorldPosition(_v3a);
+
+  const f = _v3b.set(0, 0, 0);
+  if (middleMcp) middleMcp.getWorldPosition(f);
+  f.sub(w);
+  if (f.lengthSq() < 1e-8) f.set(side === "left" ? 1 : -1, 0, 0);
+  f.normalize();
+
+  const a = _v3c.set(0, 0, 1);
+  if (indexMcp && pinkyMcp) {
+    indexMcp.getWorldPosition(a);
+    pinkyMcp.getWorldPosition(_v3d);
+    a.sub(_v3d);
+    if (a.lengthSq() > 1e-8) {
+      a.addScaledVector(f, -a.dot(f)).normalize();
+    } else {
+      a.set(0, 0, 1);
+    }
+  }
+
+  const n = new THREE.Vector3().crossVectors(f, a).normalize();
+  if (side === "left") n.negate();
+
+  const b  = new THREE.Vector3().crossVectors(n, f).normalize();
+  const nO = new THREE.Vector3().crossVectors(f, b).normalize();
+
+  return { b, nO, f, worldQuat: handBone.getWorldQuaternion(new THREE.Quaternion()) };
+}
+
 export function captureRestPose(vrm, bones) {
   if (!vrm) return null;
   vrm.scene.updateMatrixWorld(true);
-
   const rest = {};
 
-  // 1. Capture Arm and Leg Rest Vectors
   for (const chain of LIMB_CHAINS) {
-    const b = bones[chain.bone];
-    const c = bones[chain.child];
+    const b = bones[chain.bone], c = bones[chain.child];
     if (!b || !c) continue;
-
-    const bp = new THREE.Vector3();
-    const cp = new THREE.Vector3();
+    const bp = new THREE.Vector3(), cp = new THREE.Vector3();
     b.getWorldPosition(bp);
     c.getWorldPosition(cp);
-
-    const d = cp.clone().sub(bp);
+    const d = cp.sub(bp);
     if (d.lengthSq() < 1e-8) continue;
-    d.normalize();
-
-    const quat = new THREE.Quaternion();
-    b.getWorldQuaternion(quat);
-    rest[chain.bone] = { dir: d, quat };
-  }
-
-  // 2. Capture Wrist 3D Orthonormal Bases
-  for (const side of ["left", "right"]) {
-    const handBone = bones[`${side}Hand`];
-    const indexMcp = bones[`${side}IndexProximal`];
-    const pinkyMcp = bones[`${side}LittleProximal`];
-    const middleMcp = bones[`${side}MiddleProximal`] || bones[`${side}IndexProximal`];
-
-    if (!handBone) continue;
-
-    const hp = new THREE.Vector3();
-    handBone.getWorldPosition(hp);
-
-    const fwd = new THREE.Vector3();
-    if (middleMcp) {
-      middleMcp.getWorldPosition(fwd);
-      fwd.sub(hp).normalize();
-    } else {
-      fwd.set(side === "left" ? 1 : -1, 0, 0);
-    }
-
-    const across = new THREE.Vector3(0, 0, 1);
-    if (indexMcp && pinkyMcp) {
-      const ip = new THREE.Vector3();
-      const pp = new THREE.Vector3();
-      indexMcp.getWorldPosition(ip);
-      pinkyMcp.getWorldPosition(pp);
-      across.copy(pp).sub(ip).normalize();
-    }
-
-    const norm = new THREE.Vector3().crossVectors(fwd, across).normalize();
-    if (side === "left") {
-      norm.negate();
-    }
-
-    const binormal = new THREE.Vector3().crossVectors(fwd, norm).normalize();
-    norm.crossVectors(binormal, fwd).normalize();
-
-    const quat = new THREE.Quaternion();
-    handBone.getWorldQuaternion(quat);
-
-    rest[`${side}Hand`] = {
-      fwd,
-      norm,
-      binormal,
-      quat,
+    const len = Math.max(d.length(), 1e-5);
+    rest[chain.bone] = {
+      dir: d.normalize(),
+      quat: b.getWorldQuaternion(new THREE.Quaternion()),
+      len,
     };
   }
 
-  console.log("[Avatar] Rest pose captured for:", Object.keys(rest).join(", "));
+  for (const side of ["left", "right"]) {
+    const basis = buildHandBasis(
+      bones[`${side}Hand`],
+      bones[`${side}MiddleProximal`],
+      bones[`${side}IndexProximal`],
+      bones[`${side}LittleProximal`],
+      side,
+    );
+    if (basis) rest[`${side}HandBasis`] = basis;
+  }
+
+  for (const side of ["left", "right"]) {
+    for (const names of Object.values(FINGER_BONES[side])) {
+      for (const name of names) {
+        const bone = bones[name];
+        if (bone) rest[name] = { x: bone.rotation.x, y: bone.rotation.y, z: bone.rotation.z };
+      }
+    }
+  }
+
+  console.log("[Avatar] Rest pose captured:", Object.keys(rest).length, "entries");
   return rest;
 }

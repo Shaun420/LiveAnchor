@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gemini Live — Standalone</title>
+  <style>
+    :root {
+      --bg: #0a0a0a;
+      --fg: #0f0;
+      --dim: #555;
+      --err: #f55;
+      --warn: #fa0;
+      --accent: #0af;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      background: var(--bg);
+      color: var(--fg);
+      min-height: 100vh;
+      padding: 16px;
+    }
+    h1 { margin: 0 0 12px; font-size: 18px; }
+    .layout {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      max-width: 1400px;
+    }
+    @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+    .panel {
+      border: 1px solid var(--dim);
+      border-radius: 8px;
+      padding: 12px;
+      background: #111;
+    }
+    .panel h2 { margin: 0 0 8px; font-size: 14px; color: var(--accent); }
+    .controls {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    button, input[type="text"], input[type="password"] {
+      background: #222;
+      color: var(--fg);
+      border: 1px solid var(--dim);
+      padding: 6px 10px;
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: 13px;
+    }
+    button { cursor: pointer; }
+    button:hover { background: #333; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.primary { background: var(--accent); color: #000; border-color: var(--accent); }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      margin-left: 8px;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--err);
+    }
+    .dot.live { background: var(--fg); box-shadow: 0 0 8px var(--fg); }
+    .dot.warn { background: var(--warn); }
+    video { display: block; max-width: 100%; border: 1px solid var(--dim); border-radius: 4px; }
+    .video-wrap { position: relative; }
+    .video-overlay {
+      position: absolute;
+      bottom: 8px;
+      right: 8px;
+      background: rgba(0,0,0,0.7);
+      color: var(--fg);
+      font-size: 11px;
+      padding: 3px 6px;
+      border-radius: 3px;
+      pointer-events: none;
+    }
+    .log {
+      background: #050505;
+      border: 1px solid var(--dim);
+      border-radius: 4px;
+      padding: 8px;
+      height: 400px;
+      overflow-y: auto;
+      font-size: 11px;
+      line-height: 1.5;
+    }
+    .log-entry { margin-bottom: 2px; word-wrap: break-word; }
+    .log-entry.tool { color: var(--warn); }
+    .log-entry.err { color: var(--err); }
+    .log-entry.send { color: var(--accent); }
+    .log-entry.recv { color: var(--fg); }
+    .log-entry.sys { color: var(--dim); }
+    .stat-row {
+      display: flex;
+      gap: 16px;
+      font-size: 12px;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+    }
+    .stat {
+      padding: 4px 8px;
+      background: #1a1a1a;
+      border-radius: 4px;
+    }
+    .stat .label { color: var(--dim); margin-right: 6px; }
+    .stat .value { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <h1>🟢 Gemini Live API — Standalone</h1>
+
+  <div class="controls">
+    <input type="password" id="apiKey" placeholder="Gemini API key (or set GEMINI_API_KEY)" style="width: 320px;" />
+    <button id="connectBtn" class="primary">Connect</button>
+    <button id="disconnectBtn" disabled>Disconnect</button>
+    <button id="testBtn" disabled>Send Test Frame</button>
+    <button id="clearLogBtn">Clear Log</button>
+    <span class="status">
+      <span class="dot" id="statusDot"></span>
+      <span id="statusText">Offline</span>
+    </span>
+  </div>
+
+  <div class="stat-row">
+    <div class="stat"><span class="label">Sent:</span><span class="value" id="sentCount">0</span></div>
+    <div class="stat"><span class="label">Received:</span><span class="value" id="recvCount">0</span></div>
+    <div class="stat"><span class="label">Tool calls:</span><span class="value" id="toolCount">0</span></div>
+    <div class="stat"><span class="label">Latency (ms):</span><span class="value" id="latency">—</span></div>
+    <div class="stat"><span class="label">FPS:</span><span class="value" id="fps">0</span></div>
+  </div>
+
+  <div class="layout">
+    <div class="panel">
+      <h2>📹 Webcam (raw feed to Gemini)</h2>
+      <div class="video-wrap">
+        <video id="webcam" autoplay playsinline muted></video>
+        <div class="video-overlay" id="overlay">No camera</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>📋 Event Log</h2>
+      <div class="log" id="log"></div>
+    </div>
+  </div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

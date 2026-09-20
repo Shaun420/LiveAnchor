@@ -7,8 +7,9 @@ export function driveExpressions(vrm, data) {
   const face = data?.face;
 
   const set = (name, val) => {
-    const e = em.getExpression(name);
-    if (e) e.weight = THREE.MathUtils.clamp(val, 0, 1);
+    if (em.getExpression(name)) {
+      em.setValue(name, THREE.MathUtils.clamp(val, 0, 1));
+    }
   };
 
   if (bs) {

@@ -1,6 +1,12 @@
 import { bindControls } from "./app/controls.js";
 import { runPhase1Tests, testHeadSigns, testFilterQuality } from "./testing/phase1.js";
-import { testHands, testFingerDriver } from "./testing/hands.js";
+import {
+  testHands,
+  testFingerDriver,
+  testFistRamp,
+  testWristInvariance,
+  testHandSymmetry,
+} from "./testing/hands.js";
 import { openBoneInspector, closeBoneInspector } from "./testing/boneInspector.js";
 
 const $ = (id) => document.getElementById(id);
@@ -37,21 +43,24 @@ bindControls({
   streamBtn:     $("streamBtn"),
 });
 
-window.runPhase1Tests  = runPhase1Tests;
-window.testHeadSigns   = testHeadSigns;
+window.runPhase1Tests    = runPhase1Tests;
+window.testHeadSigns     = testHeadSigns;
 window.testFilterQuality = testFilterQuality;
 
-console.log("[App] Tests ready:");
-console.log("  window.runPhase1Tests()    — full test suite");
-console.log("  window.testHeadSigns()     — calibrate head sign directions");
-console.log("  window.testFilterQuality() — measure filter jitter");
+window.testHands           = testHands;
+window.testFingerDriver    = testFingerDriver;
+window.testFistRamp        = testFistRamp;
+window.testWristInvariance = testWristInvariance;
+window.testHandSymmetry    = testHandSymmetry;
 
-window.testHands = testHands;
-window.testFingerDriver = testFingerDriver;
-
-console.log("  window.testHands()         — hand tracking accuracy");
-console.log("  window.testFingerDriver()  — force fist to test bone rotation");
-
-window.openBoneInspector = openBoneInspector;
+window.openBoneInspector  = openBoneInspector;
 window.closeBoneInspector = closeBoneInspector;
-console.log("  window.openBoneInspector() — live bone rotation tool");
+
+console.log("[App] Diagnostic tools exposed on window:");
+console.log("  window.runPhase1Tests()");
+console.log("  window.testHands()");
+console.log("  window.testFistRamp()");
+console.log("  window.testWristInvariance()");
+console.log("  window.testHandSymmetry()");
+console.log("  window.testFingerDriver()");
+console.log("  window.openBoneInspector()");

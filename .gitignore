@@ -2,3 +2,4 @@ research papers/
 node_modules/
 .env
 models/
+model data.txt

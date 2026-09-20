@@ -1,9 +1,9 @@
 import { Tracker } from "../tracker/index.js";
 import { AvatarController } from "../avatar/index.js";
 import { Recorder } from "../recorder.js";
-import { GeminiLiveThrottler } from "./gemini-live-throttler.js";
-import { GeminiLiveClient } from "./gemini-client.js";
 import { PerformanceProfiler } from "./profiler.js";
+
+const VIDEO = { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } };
 
 export const state = {
   tracker: null,
@@ -13,46 +13,95 @@ export const state = {
   running: false,
   facingMode: "user",
   mirrored: true,
-  
-  // God-Tier Architecture Additions
   profiler: null,
   throttler: null,
   geminiClient: null,
+  poseLifter: null,
 };
+
+async function openStream(facingMode) {
+  return navigator.mediaDevices.getUserMedia({ video: { ...VIDEO, facingMode }, audio: false });
+}
+
+async function initGemini(webcam) {
+  const API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
+  if (!API_KEY) {
+    console.warn("[App] VITE_GEMINI_API_KEY not set — AI Director disabled (local-only mode).");
+    return;
+  }
+
+  try {
+    const [{ GeminiLiveClient }, { GeminiLiveThrottler }] = await Promise.all([
+      import("./gemini-client.js"),
+      import("./gemini-live-throttler.js"),
+    ]);
+
+    state.geminiClient = new GeminiLiveClient(API_KEY);
+    state.throttler = new GeminiLiveThrottler();
+    state.throttler.onHeartbeat = (jpeg) => state.geminiClient.sendHeartbeat(jpeg);
+
+    state.geminiClient.onGesture = (gesture, hand) => {
+      window.avatar?.triggerGesture?.(gesture, hand);
+      state.profiler?.setLastToolCall?.(`gesture:${gesture}(${hand})`);
+    };
+    state.geminiClient.onHandIKTarget = (hand, target) => {
+      window.avatar?.setHandIKTarget?.(hand, target);
+      state.profiler?.setLastToolCall?.(`ik:${hand}→${target}`);
+    };
+    state.geminiClient.onPropSpawn = (propName, hand) => {
+      window.avatar?.spawnProp?.(propName, hand);
+      state.profiler?.setLastToolCall?.(`prop:${propName}(${hand})`);
+    };
+    state.geminiClient.onConnectionChange = (ok) => state.profiler?.setGeminiStatus?.(ok);
+
+    state.geminiClient.connect();
+    state.throttler.init(webcam);
+    console.log("[App] AI Director initialized (1 FPS heartbeat)");
+  } catch (err) {
+    console.warn("[App] AI Director init failed:", err.message);
+    state.geminiClient = null;
+    state.throttler = null;
+  }
+}
+
+async function restartThrottler(webcam) {
+  if (!state.geminiClient) return;
+  state.throttler?.dispose();
+  const { GeminiLiveThrottler } = await import("./gemini-live-throttler.js");
+  state.throttler = new GeminiLiveThrottler();
+  state.throttler.onHeartbeat = (jpeg) => state.geminiClient.sendHeartbeat(jpeg);
+  state.throttler.init(webcam);
+}
 
 export async function startApp(elements) {
   const { webcam, overlay, stage } = elements;
 
-  // 1. Camera Setup (Video only is fine for ER-2 Video Heartbeats)
-  state.stream = await navigator.mediaDevices.getUserMedia({
-    video: {
-      width: { ideal: 1280 },
-      height: { ideal: 720 },
-      frameRate: { ideal: 30 },
-      facingMode: state.facingMode,
-    },
-    audio: false, 
-  });
-
+  try {
+    state.stream = await openStream(state.facingMode);
+  } catch (err) {
+    const reason = err.name === "NotAllowedError" ? "permission denied" : err.message;
+    throw new Error(`Camera access failed: ${reason}`);
+  }
   webcam.srcObject = state.stream;
   await new Promise((r) => (webcam.onloadedmetadata = r));
   await webcam.play();
 
   const w = webcam.videoWidth;
   const h = webcam.videoHeight;
-  console.log("[App] Camera:", w, "x", h, state.facingMode);
-
   overlay.width = w;
   overlay.height = h;
 
-  // 2. Core Pipeline (Tracker + Avatar)
-  const urlPreset = new URLSearchParams(location.search).get("preset");
-  state.tracker = new Tracker(urlPreset); 
+  const preset = new URLSearchParams(location.search).get("preset");
+  state.tracker = new Tracker(preset);
   await state.tracker.init();
 
-  state.avatar = new AvatarController(overlay);
+  const avatarCanvas = document.getElementById("avatarCanvas");
+  avatarCanvas.width = w;
+  avatarCanvas.height = h;
+  state.avatar = new AvatarController(avatarCanvas);
   state.avatar.setSourceSize(w, h);
   state.avatar.resize();
+  state.avatar.config.mirrored = state.mirrored;
 
   window.avatar = state.avatar;
   window.tracker = state.tracker;
@@ -65,146 +114,87 @@ export async function startApp(elements) {
   }
 
   state.recorder = new Recorder(stage);
+  state.profiler = new PerformanceProfiler();
   state.running = true;
 
-  // ==========================================
-  // 3. GOD-TIER ARCHITECTURE INITIALIZATION
-  // ==========================================
-
-  // A. Performance Profiler (Diagnostic HUD)
-  state.profiler = new PerformanceProfiler();
-
-  // B. Gemini Live Client (WebSocket ER-2 Streaming)
-  const API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
-  if (API_KEY) {
-    state.geminiClient = new GeminiLiveClient(API_KEY);
-    state.throttler = new GeminiLiveThrottler();
-
-    // Wire Throttler -> Client (1 FPS Heartbeats)
-    state.throttler.onHeartbeat = (base64Jpeg) => {
-      state.geminiClient.sendHeartbeat(base64Jpeg);
-    };
-
-    // // Wire Client -> Avatar (Semantic Overrides & Emotions)
-    // state.geminiClient.onEmotionChange = (emotion, intensity) => {
-    //   console.log(`[Avatar] AI Emotion: ${emotion} (${intensity})`);
-    //   if (window.avatar && window.avatar.setEmotion) {
-    //     window.avatar.setEmotion(emotion, intensity);
-    //   }
-    // };
-    
-    state.geminiClient.onPropSpawn = (propName, hand) => {
-      console.log(`[Avatar] AI Prop: ${propName} in ${hand} hand`);
-      if (window.avatar?.spawnProp) window.avatar.spawnProp(propName, hand);
-    };
-
-    state.geminiClient.onGesture = (gesture, hand) => {
-      console.log(`[Avatar] AI Gesture Override: ${gesture} on ${hand}`);
-      if (window.avatar && window.avatar.triggerGesture) window.avatar.triggerGesture(gesture, hand);
-    };
-
-    state.geminiClient.onHandIKTarget = (hand, target) => {
-      console.log(`[Avatar] AI IK Override: ${hand} hand locked to ${target}`);
-      if (window.avatar && window.avatar.setHandIKTarget) window.avatar.setHandIKTarget(hand, target);
-    };
-
-    // Wire Client -> Profiler (HUD Status)
-    state.geminiClient.onConnectionChange = (isConnected) => {
-      if (state.profiler) state.profiler.setGeminiStatus(isConnected);
-    };
-
-    // Start WebSocket and 1 FPS Capture
-    state.geminiClient.connect();
-    state.throttler.init(webcam); 
-    
-    console.log("[App] Gemini WebSocket & 1 FPS Throttler initialized");
-  } else {
-    console.warn("[App] VITE_GEMINI_API_KEY not found. AI Director disabled.");
+  // ONNX lifter is FROZEN until Phase 2 — opt-in via ?lifter=1 only.
+  if (new URLSearchParams(location.search).get("lifter") === "1") {
+    try {
+      const { PoseLifter } = await import("./poseLifter.js");
+      state.poseLifter = new PoseLifter();
+      state.poseLifter.init();
+    } catch (err) {
+      console.warn("[App] PoseLifter unavailable:", err.message);
+    }
   }
+
+  initGemini(webcam);
 }
 
 export async function stopApp(webcam) {
   state.running = false;
-  
-  // Cleanup God-Tier components
-  if (state.throttler) {
-    state.throttler.dispose();
-    state.throttler = null;
-  }
-  if (state.geminiClient) {
-    state.geminiClient.disconnect();
-    state.geminiClient = null;
+
+  state.throttler?.dispose();
+  state.geminiClient?.disconnect();
+  state.throttler = null;
+  state.geminiClient = null;
+
+  state.poseLifter?.dispose?.();
+  state.poseLifter = null;
+
+  state.recorder?.stop?.();
+  state.profiler?.dispose?.();
+  state.profiler = null;
+
+  state.avatar?.dispose?.();
+  state.tracker?.dispose?.();
+  state.avatar = null;
+
+  // Firefox/Chromium refuse a new WebGL context on a canvas after forceContextLoss().
+  // Swap in a fresh clone node so every start gets a clean WebGL context.
+  const oldCanvas = document.getElementById("avatarCanvas");
+  if (oldCanvas) {
+    const fresh = oldCanvas.cloneNode(false);
+    oldCanvas.replaceWith(fresh);
   }
 
-  // Cleanup Camera
   state.stream?.getTracks().forEach((t) => t.stop());
   state.stream = null;
-  webcam.srcObject = null;
+  if (webcam) webcam.srcObject = null;
 }
 
 export async function flipCamera(webcam, overlay) {
-  // Stop current
-  state.stream?.getTracks().forEach((t) => t.stop());
-  
-  // Dispose old throttler before switching streams to prevent memory leaks
-  if (state.throttler) {
-    state.throttler.dispose();
-    state.throttler = null;
-  }
+  const target = state.facingMode === "user" ? "environment" : "user";
 
-  state.facingMode = state.facingMode === "user" ? "environment" : "user";
-  state.mirrored = state.facingMode === "user";
-
+  let stream;
   try {
-    state.stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-        frameRate: { ideal: 30 },
-        facingMode: state.facingMode,
-      },
-      audio: false,
-    });
-
-    webcam.srcObject = state.stream;
-    await webcam.play();
-
-    const w = webcam.videoWidth;
-    const h = webcam.videoHeight;
-    overlay.width = w;
-    overlay.height = h;
-    state.avatar?.setSourceSize(w, h);
-    state.tracker?.filters.reset();
-
-    // Re-init throttler with new webcam element if Gemini is active
-    if (state.geminiClient) {
-      state.throttler = new GeminiLiveThrottler();
-      state.throttler.onHeartbeat = (base64Jpeg) => {
-        state.geminiClient.sendHeartbeat(base64Jpeg);
-      };
-      state.throttler.init(webcam);
-    }
-
-    console.log("[App] Camera flipped to:", state.facingMode);
+    stream = await openStream(target);
   } catch (err) {
-    console.warn("[App] Flip failed, restoring:", err.message);
-    state.facingMode = state.facingMode === "user" ? "environment" : "user";
-    state.mirrored = state.facingMode === "user";
-
-    state.stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: state.facingMode },
-      audio: false,
-    });
-    webcam.srcObject = state.stream;
-    await webcam.play();
-    
-    // Re-init throttler on fallback
-    if (state.geminiClient) {
-      state.throttler = new GeminiLiveThrottler();
-      state.throttler.onHeartbeat = (base64Jpeg) => {
-        state.geminiClient.sendHeartbeat(base64Jpeg);
-      };
-      state.throttler.init(webcam);
-    }
+    console.warn("[App] Flip failed — keeping current camera:", err.message);
+    return;
   }
+
+  state.stream?.getTracks().forEach((t) => t.stop());
+  state.stream = stream;
+  state.facingMode = target;
+  state.mirrored = target === "user";
+
+  webcam.srcObject = stream;
+  await webcam.play();
+
+  const w = webcam.videoWidth;
+  const h = webcam.videoHeight;
+  overlay.width = w;
+  overlay.height = h;
+  const avatarCanvas = document.getElementById("avatarCanvas");
+  if (avatarCanvas) {
+    avatarCanvas.width = w;
+    avatarCanvas.height = h;
+  }
+  state.avatar?.setSourceSize(w, h);
+  if (state.avatar) state.avatar.config.mirrored = state.mirrored;
+  state.tracker?.filters?.reset?.();
+
+  await restartThrottler(webcam);
+  console.log("[App] Camera flipped to:", target);
 }

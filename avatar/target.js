@@ -1,52 +1,62 @@
 import * as THREE from "three";
 
+const _ndcVec = new THREE.Vector3();
+const _worldPos = new THREE.Vector3();
+const _dirVec = new THREE.Vector3();
+
+/**
+ * Computes the 3D world position and rotation for the avatar's root anchor.
+ * Uses camera unprojection to map 2D screen coordinates to the 3D plane.
+ */
 export function computeTarget(face, body, camera, config) {
-  const fw = face.frameWidth || config.sourceWidth;
-  const fh = face.frameHeight || config.sourceHeight;
-  const eyeN = face.eyeDistanceNorm ?? (face.eyeDistance || 0) / fw;
+  let targetX = 0;
+  let targetY = 0;
+  let targetScale = config.sizeMultiplier || 1.0;
+  
+  let targetYaw = 0;
+  let targetPitch = 0;
+  let targetRoll = 0;
+  let targetShoulderTilt = 0;
 
-  // Visible plane at camera distance
-  const d = Math.abs(camera.position.z);
-  const fov = THREE.MathUtils.degToRad(camera.fov);
-  const planeH = 2 * Math.tan(fov / 2) * d;
-  const planeW = planeH * camera.aspect;
+  if (face) {
+    const ndcX0 = (face.xNorm * 2) - 1;
+    const ndcX = config.mirrored ? -ndcX0 : ndcX0;
+    const ndcY = (face.yNorm * 2) - 1;
 
-  // Scale
-  const absYaw = Math.abs(face.yaw || 0);
-  const yawCos = Math.max(config.minYawCos, Math.cos(absYaw));
-  const corrected = eyeN / Math.pow(yawCos, config.yawScaleCompensation);
-  let scaleEye = (corrected * planeW * config.sizeMultiplier) / config.avatarEyeDistance;
-  let scale = scaleEye;
+    _ndcVec.set(ndcX, ndcY, 0.5);
+    _ndcVec.unproject(camera);
 
-  if (body && !body.synthesized && body.shoulderWidthNorm) {
-    const sn = body.shoulderWidthNorm;
-    const expected = eyeN * config.avatarShoulderToEyeRatio;
-    const r = sn / (expected || 0.01);
-    if (r > 0.4 && r < 2.5) {
-      const scaleSh = (sn * planeW * config.sizeMultiplier) / config.avatarShoulderWidth;
-      const sw = config.shoulderScaleWeight;
-      scale = scaleSh * sw + scaleEye * (1 - sw);
+    _dirVec.copy(_ndcVec).sub(camera.position).normalize();
+    
+    if (Math.abs(_dirVec.z) > 1e-6) {
+      const distance = -camera.position.z / _dirVec.z;
+      _worldPos.copy(camera.position).addScaledVector(_dirVec, distance);
+      
+      targetX = _worldPos.x;
+      targetY = _worldPos.y;
     }
-  }
-  scale = THREE.MathUtils.clamp(scale, 0.05, 20);
 
-  // Position
-  let x, y;
-  if (body && !body.synthesized && body.shoulderMidXNorm !== undefined) {
-    x = (body.shoulderMidXNorm - 0.5) * planeW;
-    y = (0.5 - body.shoulderMidYNorm) * planeH;
-  } else {
-    const xn = face.xNorm ?? face.x / fw;
-    const yn = face.yNorm ?? face.y / fh;
-    x = (xn - 0.5) * planeW;
-    y = (0.5 - yn) * planeH - eyeN * 2.5 * planeH * config.sizeMultiplier;
+    const refEyeDist = config.referenceEyeDistance || 0.15;
+    if (face.eyeDistanceNorm > 0.02) {
+      targetScale = (face.eyeDistanceNorm / refEyeDist) * (config.sizeMultiplier || 1.0);
+    }
+
+    targetYaw = face.yaw;
+    targetPitch = face.pitch;
+    targetRoll = face.roll;
+  }
+
+  if (body) {
+    targetShoulderTilt = body.shoulderTilt || 0;
   }
 
   return {
-    x, y, scale,
-    yaw: face.yaw || 0,
-    pitch: face.pitch || 0,
-    roll: face.roll || 0,
-    shoulderTilt: body && !body.synthesized ? (body.shoulderTilt || 0) : 0,
+    x: targetX,
+    y: targetY,
+    scale: targetScale,
+    yaw: targetYaw,
+    pitch: targetPitch,
+    roll: targetRoll,
+    shoulderTilt: targetShoulderTilt,
   };
 }

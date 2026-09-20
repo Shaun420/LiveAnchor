@@ -7,35 +7,23 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>LiveAnchor</title>
-  <link rel="stylesheet" href="style.css" />
-
-  <script type="importmap">
-  {
-    "imports": {
-      "three": "https://cdn.jsdelivr.net/npm/three@0.185.1/build/three.module.min.js",
-      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.185.1/examples/jsm/",
-      "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.5.5/lib/three-vrm.module.min.js"
-    }
-  }
-  </script>
+  <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
 
 <div class="app" id="app">
 
-  <!-- Main stage: fullscreen on mobile -->
   <div class="stage" id="stage">
-    <video id="webcam" autoplay playsinline muted></video>
-    <canvas id="overlay"></canvas>
+      <video id="webcam" autoplay playsinline muted></video>
+      <canvas id="overlay"></canvas>
+      <canvas id="avatarCanvas"></canvas>
 
-    <!-- HUD: top bar -->
     <div class="hud-top">
       <span id="fps">0 FPS</span>
       <span id="trackingStatus" class="status-dot">●</span>
       <span id="modeLabel">--</span>
     </div>
 
-    <!-- HUD: bottom controls (mobile-friendly tap targets) -->
     <div class="hud-bottom">
       <button class="hud-btn" id="startBtn">▶</button>
       <button class="hud-btn" id="flipBtn" title="Flip Camera">⟳</button>
@@ -44,11 +32,9 @@
       <button class="hud-btn" id="settingsBtn" title="Settings">⚙</button>
     </div>
 
-    <!-- Debug overlay (tap to toggle) -->
     <pre class="debug-overlay" id="debugInfo"></pre>
   </div>
 
-  <!-- Settings drawer (slides up from bottom) -->
   <div class="drawer" id="drawer">
     <div class="drawer-handle"></div>
 
@@ -98,6 +84,6 @@
 
 </div>
 
-<script src="app.js" type="module"></script>
+<script src="./app.js" type="module"></script>
 </body>
 </html>

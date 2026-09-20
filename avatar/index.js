@@ -1,13 +1,13 @@
 import * as THREE from "three";
 import { VRMUtils } from "@pixiv/three-vrm";
-import { _euler } from "./constants.js";
 import { loadVRM, measureModel } from "./loader.js";
 import { findAllBones, captureRestPose } from "./bones.js";
 import { driveHead, driveEyes, driveTorso, driveHips, driveLimbs, driveFingers, lerpBone } from "./drivers.js";
 import { driveExpressions } from "./expressions.js";
 import { computeTarget } from "./target.js";
-import { solveArmIK, applyFingerPose, ANCHORS, GESTURE_POSES, GRIP_POSE } from "./overrides.js";
+import { solveArmIK, applyFingerPose, GESTURE_POSES, GRIP_POSE, captureAnchors } from "./overrides.js";
 import { PropManager } from "./props.js";
+import { applyLiftedPose } from "./lifting.js";
 
 export class AvatarController {
   constructor(canvas) {
@@ -23,30 +23,23 @@ export class AvatarController {
     this.camera = new THREE.PerspectiveCamera(30, w / h, 0.1, 100);
     this.camera.position.set(0, 0, 2);
 
-    this.renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+    this.renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true, powerPreference: "high-performance" });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(w, h, false);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
 
-    // CRITICAL FIX: Handle WebGL context loss on mobile devices
-    // If GPU runs out of memory (common with ONNX WebGPU + MediaPipe + Three.js),
-    // the browser silently loses the context. We pause the loop and alert the user.
-    this.renderer.domElement.addEventListener('webglcontextlost', (event) => {
-      event.preventDefault(); // Prevent the default "reload page" alert
-      console.error("[Avatar] WebGL Context Lost! GPU memory exhausted. Pausing rendering.");
-      cancelAnimationFrame(this._animateId || 0);
-      // Optionally show a UI overlay to the user
-      this.renderer.domElement.style.display = 'none';
-    }, false);
-
-    this.renderer.domElement.addEventListener('webglcontextrestored', () => {
-      console.log("[Avatar] WebGL Context Restored. Resuming rendering.");
-      this.renderer.domElement.style.display = '';
-      // Resume the animation loop if it was paused
-      if (this._animateId) {
-        this.animate();
-      }
-    }, false);
+    this._onContextLost = (e) => {
+      e.preventDefault();
+      console.error("[Avatar] WebGL context lost — pausing render.");
+      this._contextLost = true;
+    };
+    this._onContextRestored = () => {
+      console.log("[Avatar] WebGL context restored.");
+      this._contextLost = false;
+    };
+    this.renderer.domElement.addEventListener("webglcontextlost", this._onContextLost, false);
+    this.renderer.domElement.addEventListener("webglcontextrestored", this._onContextRestored, false);
+    this._contextLost = false;
 
     this.props = new PropManager();
 
@@ -59,16 +52,6 @@ export class AvatarController {
     this.scene.add(this.anchorRoot);
     this.modelRoot = new THREE.Group();
     this.anchorRoot.add(this.modelRoot);
-
-    this.debugBox = new THREE.Mesh(
-      new THREE.BoxGeometry(0.1, 0.1, 0.1),
-      new THREE.MeshBasicMaterial({ color: 0xff0000, wireframe: true })
-    );
-    this.anchorMarker = new THREE.Mesh(
-      new THREE.SphereGeometry(0.02, 12, 12),
-      new THREE.MeshBasicMaterial({ color: 0x00ff00 })
-    );
-    this.scene.add(this.debugBox, this.anchorMarker);
 
     this.config = {
       sizeMultiplier: 0.4,
@@ -83,35 +66,26 @@ export class AvatarController {
       avatarEyeDistance: 0.065,
       avatarShoulderWidth: 0.3,
       avatarShoulderToEyeRatio: 4.6,
+      mirrored: true,
     };
 
     this.state = { x: 0, y: 0, scale: 1, yaw: 0, pitch: 0, roll: 0, shoulderTilt: 0 };
     this.bones = {};
     this.rest = null;
-    this.testMode = "off";
     this.currentMode = "none";
-
-    this.debugLimbs = false;
-    this._fc = 0;
-    this._logInterval = 120;
+    this._modeCandidate = null;
+    this._modeStreak = 0;
 
     this.hasEyeBones = false;
     this.hasFingerBones = false;
     this.hasHipBone = false;
-    this._loggedFeatures = false;
-    this._lastModeLog = "";
 
-    // ==========================================
-    // AI DIRECTOR STATE (Semantic Overrides)
-    // ==========================================
     this.handOverrides = { left: null, right: null };
     this.activeGestures = { left: null, right: null };
+    this._gestureTimers = new Map();
     this.currentEmotion = null;
     this.emotionIntensity = 1.0;
   }
-
-  get response() { return this.config.response; }
-  set response(v) { this.config.response = v; }
 
   setSourceSize(w, h) {
     this.config.sourceWidth = Math.max(1, w);
@@ -119,7 +93,6 @@ export class AvatarController {
   }
 
   async loadVRM(url) {
-    console.log("[Avatar] Loading:", url);
     if (this.vrm) {
       this.modelRoot.remove(this.vrm.scene);
       VRMUtils.deepDispose(this.vrm.scene);
@@ -127,12 +100,12 @@ export class AvatarController {
     }
 
     this.vrm = await loadVRM(url);
-
-    [this.modelRoot, this.anchorRoot].forEach((g) => {
-      g.position.set(0, 0, 0);
-      g.rotation.set(0, 0, 0);
-      g.scale.setScalar(1);
-    });
+    this.modelRoot.position.set(0, 0, 0);
+    this.modelRoot.rotation.set(0, 0, 0);
+    this.modelRoot.scale.setScalar(1);
+    this.anchorRoot.position.set(0, 0, 0);
+    this.anchorRoot.rotation.set(0, 0, 0);
+    this.anchorRoot.scale.setScalar(1);
 
     this.modelRoot.add(this.vrm.scene);
 
@@ -143,165 +116,124 @@ export class AvatarController {
 
     this.bones = findAllBones(this.vrm);
     this.rest = captureRestPose(this.vrm, this.bones);
+    captureAnchors(this);
 
     this.hasEyeBones = !!(this.bones.leftEye && this.bones.rightEye);
     this.hasFingerBones = !!(this.bones.leftIndexProximal && this.bones.rightIndexProximal);
     this.hasHipBone = !!this.bones.hips;
-
-    console.log("[Avatar] Features:",
-      "eyes:", this.hasEyeBones,
-      "| fingers:", this.hasFingerBones,
-      "| hips:", this.hasHipBone
-    );
-
-    if (this.vrm.expressionManager) {
-      const names = this.vrm.expressionManager.expressions.map((e) => e.expressionName);
-      console.log("[Avatar] Expressions:", names.join(", "));
-    }
-
-    console.log("[Avatar] VRM loaded.");
   }
 
-  // ==========================================
-  // AI DIRECTOR SEMANTIC OVERRIDES
-  // ==========================================
+  recaptureRest() {
+    if (!this.vrm) return null;
+    this.rest = captureRestPose(this.vrm, this.bones);
+    captureAnchors(this);
+    return this.rest;
+  }
 
   setEmotion(emotion, intensity = 1.0) {
     this.currentEmotion = emotion;
     this.emotionIntensity = intensity;
-    
-    if (this.vrm?.expressionManager) {
-      // Reset standard emotions
-      const emotions = ['happy', 'angry', 'sad', 'relaxed', 'surprised'];
-      emotions.forEach(name => {
-        if (this.vrm.expressionManager.getExpression(name)) {
-          this.vrm.expressionManager.setValue(name, 0.0);
-        }
-      });
+    const em = this.vrm?.expressionManager;
+    if (!em) return;
 
-      // Map AI emotion names to VRM blendshape names
-      const map = { 
-        joy: 'happy', 
-        anger: 'angry', 
-        sorrow: 'sad', 
-        surprise: 'surprised', 
-        focus: 'relaxed' 
-      };
-      
-      const target = map[emotion];
-      if (target && this.vrm.expressionManager.getExpression(target)) {
-        this.vrm.expressionManager.setValue(target, intensity);
+    ["happy", "angry", "sad", "relaxed", "surprised"].forEach((name) => {
+      if (em.getExpression(name)) {
+        em.setValue(name, 0.0);
       }
+    });
+
+    const map = { joy: "happy", anger: "angry", sorrow: "sad", surprise: "surprised", focus: "relaxed" };
+    const target = map[emotion];
+    if (target && em.getExpression(target)) {
+      em.setValue(target, intensity);
     }
   }
 
   triggerGesture(gesture, hand) {
     const hands = hand === "both" ? ["left", "right"] : [hand];
-    hands.forEach(h => {
+    for (const h of hands) {
       this.activeGestures[h] = gesture;
-      clearTimeout(this[`_ges_${h}`]);
-      this[`_ges_${h}`] = setTimeout(() => { this.activeGestures[h] = null; }, 3000);
-    });
-    console.log(`[Avatar] Gesture Override: ${gesture} on ${hand}`);
+      clearTimeout(this._gestureTimers.get(h));
+      this._gestureTimers.set(h, setTimeout(() => {
+        this.activeGestures[h] = null;
+        this._gestureTimers.delete(h);
+      }, 3000));
+    }
   }
 
   setHandIKTarget(hand, target) {
     this.handOverrides[hand] = (target === "release") ? null : target;
-    console.log(`[Avatar] IK Override: ${hand} → ${target}`);
   }
 
   spawnProp(name, hand) {
     this.props.spawn(name, hand, this.bones);
   }
 
-  // ==========================================
-  // MAIN UPDATE LOOP
-  // ==========================================
+  _sync() {
+    if (this.vrm) this.vrm.scene.updateMatrixWorld(true);
+  }
 
   update(data, dt = 1 / 60) {
-    let face = data?.face || null;
+    if (this._contextLost) return;
+
+    const face = data?.face || null;
     const body = data?.body || null;
     const hands = data?.hands || null;
 
-    if (this.testMode === "center") {
-      face = { xNorm: 0.5, yNorm: 0.5, eyeDistanceNorm: 0.15, yaw: 0, pitch: 0, roll: 0 };
-    } else if (this.testMode === "spin") {
-      const t = performance.now() * 0.001;
-      face = {
-        xNorm: 0.5, yNorm: 0.5, eyeDistanceNorm: 0.15,
-        yaw: Math.sin(t) * 0.5, pitch: Math.sin(t * 0.7) * 0.15, roll: Math.sin(t * 0.5) * 0.1,
-      };
-    }
+    const a = 1 - Math.exp(-this.config.response * Math.min(dt, 0.1));
 
     if (face) {
       const tgt = computeTarget(face, body, this.camera, this.config);
-      const a = 1 - Math.exp(-this.config.response * Math.min(dt, 0.1));
       for (const k of Object.keys(this.state)) {
         this.state[k] = THREE.MathUtils.lerp(this.state[k], tgt[k], a);
       }
     }
 
-    // Position + scale
     this.anchorRoot.position.set(this.state.x, this.state.y, 0);
     this.anchorRoot.scale.setScalar(this.state.scale);
-    this.anchorMarker.position.set(this.state.x, this.state.y, 0);
 
-    const a = 1 - Math.exp(-this.config.response * Math.min(dt, 0.1));
-
-    // Track mode changes
-    if (body?.mode) {
-      this.currentMode = body.mode;
-      if (body.mode !== this._lastModeLog) {
-        this._lastModeLog = body.mode;
-        console.log(`[Avatar] Mode: ${body.mode} | arms:${body.hasLeftArm}/${body.hasRightArm} legs:${body.hasLeftLeg}/${body.hasRightLeg}`);
+    const newMode = body?.mode || "none";
+    if (newMode !== this.currentMode) {
+      this._modeStreak = this._modeCandidate === newMode ? this._modeStreak + 1 : 1;
+      this._modeCandidate = newMode;
+      if (this._modeStreak >= 12) {
+        this.currentMode = newMode;
+        this._modeStreak = 0;
+        this._modeCandidate = null;
       }
+    } else {
+      this._modeStreak = 0;
+      this._modeCandidate = null;
     }
 
-    // Head
+    if (!this.vrm) return;
+
     driveHead(this.bones, this.state, this.config.neckHeadSplit, a);
-
-    // Eyes
-    if (this.hasEyeBones && face?.gaze) {
-      driveEyes(this.bones, face.gaze, a);
-    }
-
-    // Torso
+    if (this.hasEyeBones && face?.gaze) driveEyes(this.bones, face.gaze, a);
     driveTorso(this.bones, body?.torso, this.state.shoulderTilt, a);
+    if (this.hasHipBone && body?.hipRotation) driveHips(this.bones, body.hipRotation, body.mode, a);
+    this._sync();
 
-    // Hips
-    if (this.hasHipBone && body?.hipRotation) {
-      driveHips(this.bones, body.hipRotation, body.mode, a);
-    }
+    driveLimbs(this.vrm, this.bones, this.rest, body, a, false);
+    this._sync();
 
-    // Limbs
-    const limbLog = this.debugLimbs && this._fc % this._logInterval === 0;
-    driveLimbs(this.vrm, this.bones, this.rest, body, a, limbLog);
-    this._fc++;
-
-    // Fingers & Hands
     if (this.hasFingerBones && hands) {
-      // TODO: If this.handOverrides.left/right is active, bypass MediaPipe and apply IK/Gesture
       driveFingers(this.vrm, this.bones, this.rest, hands, a);
-      this._applySemanticOverrides(a);
     }
+    this._sync();
 
-    // One-time feature log
-    if (!this._loggedFeatures && (hands || face?.gaze)) {
-      this._loggedFeatures = true;
-      console.log("[Avatar] Active:",
-        "head:✓",
-        `eyes:${face?.gaze ? "✓" : "✗"}`,
-        `hands:${hands ? Object.keys(hands).join(",") : "✗"}`,
-        `fingers:${this.hasFingerBones ? "✓" : "✗"}`,
-        `hips:${this.hasHipBone ? "✓" : "✗"}`
-      );
+    this._applySemanticOverrides(a);
+
+    if (body?.liftedJoints17) {
+      applyLiftedPose(this, body.liftedJoints17, a);
     }
 
     driveExpressions(this.vrm, data);
-    if (this.vrm) this.vrm.update(Math.min(dt, 0.1));
+    this.vrm.update(Math.min(dt, 0.1));
   }
 
   render() {
+    if (this._contextLost) return;
     this.renderer.setClearColor(0x000000, 0);
     this.renderer.clear();
     this.renderer.render(this.scene, this.camera);
@@ -314,50 +246,40 @@ export class AvatarController {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h, false);
-    console.log("[Avatar] Resized:", w, "x", h);
   }
 
   _applySemanticOverrides(alpha) {
     for (const side of ["left", "right"]) {
       const ik = this.handOverrides[side];
       const ges = this.activeGestures[side];
-      const gripping = this.props.isHolding(side) || (ik && (ik === "chest" || ik === "hip"));
+      const gripping = this.props.isHolding(side) || (ik === "chest" || ik === "hip");
 
-      // 1. Arm IK (occlusion recovery / holding steady) — overrides driveLimbs output
-      if (ik && ANCHORS[side][ik]) {
-        solveArmIK(this, side, ANCHORS[side][ik], alpha);
+      const anchor = this.rest?.anchors?.[side]?.[ik];
+      if (ik && anchor) {
+        solveArmIK(this, side, anchor, alpha);
       }
 
-      // 2. Fingers: procedural grip > gesture > (MediaPipe already applied)
-      if (gripping)      applyFingerPose(this.bones, side, GRIP_POSE, lerpBone, alpha);
-      else if (ges)      applyFingerPose(this.bones, side, GESTURE_POSES[ges] || GESTURE_POSES.open_palm, lerpBone, alpha);
+      if (gripping) {
+        applyFingerPose(this.bones, side, GRIP_POSE, lerpBone, alpha);
+      } else if (ges) {
+        applyFingerPose(this.bones, side, GESTURE_POSES[ges] || GESTURE_POSES.open_palm, lerpBone, alpha);
+      }
     }
   }
-  setTestMode(m) { this.testMode = m; }
-  toggleDebugBox(v) { this.debugBox.visible = v; }
-  toggleAnchorMarker(v) { this.anchorMarker.visible = v; }
 
-  diagnose() {
-    console.log("=== FULL DIAGNOSTIC ===");
-    console.log("VRM:", !!this.vrm, "| Mode:", this.currentMode);
-    console.log("Eyes:", this.hasEyeBones, "| Fingers:", this.hasFingerBones, "| Hips:", this.hasHipBone);
-
-    const limbBones = ["leftUpperArm", "leftLowerArm", "rightUpperArm", "rightLowerArm",
-      "leftUpperLeg", "leftLowerLeg", "rightUpperLeg", "rightLowerLeg"];
-    for (const n of limbBones) {
-      const b = this.bones[n];
-      if (!b) { console.log(`  ${n}: MISSING`); continue; }
-      _euler.setFromQuaternion(b.quaternion);
-      console.log(`  ${n}: e°(${(_euler.x * 57.3).toFixed(1)},${(_euler.y * 57.3).toFixed(1)},${(_euler.z * 57.3).toFixed(1)})`);
+  dispose() {
+    this.renderer.domElement.removeEventListener("webglcontextlost", this._onContextLost);
+    this.renderer.domElement.removeEventListener("webglcontextrestored", this._onContextRestored);
+    for (const t of this._gestureTimers.values()) clearTimeout(t);
+    this._gestureTimers.clear();
+    this.props?.despawn?.("left");
+    this.props?.despawn?.("right");
+    if (this.vrm) {
+      this.modelRoot.remove(this.vrm.scene);
+      VRMUtils.deepDispose(this.vrm.scene);
+      this.vrm = null;
     }
-
-    const fingerBones = ["leftIndexProximal", "leftMiddleProximal", "rightIndexProximal"];
-    for (const n of fingerBones) {
-      console.log(`  ${n}: ${this.bones[n] ? "✓" : "MISSING"}`);
-    }
-
-    console.log("  hips:", this.bones.hips ? "✓" : "MISSING");
-    console.log("  leftEye:", this.bones.leftEye ? "✓" : "MISSING");
-    console.log("=======================");
+    this.renderer.dispose();
+    this.renderer.forceContextLoss?.();
   }
 }

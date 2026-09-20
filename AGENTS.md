@@ -7,9 +7,10 @@
 - Streams webcam video via `navigator.mediaDevices.getUserMedia`
 - Runs MediaPipe pose/face/hand landmark detection (WASM binaries) at 60 FPS
 - Drives a VRM (Virtual Reality Model) avatar with Three.js + `@pixiv/three-vrm`
-- **NEW:** Streams 1 FPS video heartbeats to **Gemini Robotics ER-2 Streaming API** via WebSocket for semantic hand/gesture overrides
-- Supports expressive facial animations, anatomically-correct finger curling, 2-bone IK, and procedural prop grips
-- Includes privacy masking, recording, diagnostic HUD, and automated test suite
+- **Cloud AI Director:** Streams 1 FPS video heartbeats to **Gemini Robotics ER-2 Streaming API** via WebSocket for semantic hand/gesture/prop overrides
+- **ONNX 3D Lifting:** Non-blocking Web Worker pose lifting (`MobileHumanPose` / `VideoPose3D`)
+- Supports expressive facial animations, de-crossed eye gaze solver, anatomically-correct finger curling, 2-bone IK, and procedural prop grips
+- Includes privacy masking, recording, diagnostic HUD, standalone testing app, and automated test suite
 
 **Primary Use Case:** Real-time avatar animation from webcam — suitable for VTubing, virtual try-ons, livestreaming, and interactive media.
 
@@ -19,36 +20,36 @@
 
 ## 🏗️ Architecture — 7 Layered Structure
 
-The project now follows a **7-layer architecture**. The new Layer 6 (AI Director) sits above the Real-Time Layer and provides semantic overrides.
+The project follows a **7-layer architecture** separating high-frequency local reflexes (60 FPS) from cloud semantic guidance (1 FPS):
 
 | Layer | Description | Key Files |
 |---|---|---|
 | **1. Foundation** | Webcam access + MediaPipe model initialization | `app/init.js`, `tracker/index.js`, `models/` |
 | **2. Sync Layer** | Filter pipelines for smoothing & noise reduction | `filters/index.js`, `filters/oneEuro.js`, `filters/kalman.js` |
 | **3. Async Layer** | Per-frame landmark extraction from MediaPipe output | `tracker/face.js`, `tracker/body.js`, `tracker/hands.js` |
-| **4. Real-Time Layer** | Avatar bone driving, IK, expressions, animations | `avatar/index.js`, `avatar/drivers.js`, `avatar/expressions.js`, `avatar/overrides.js`, `avatar/props.js` |
-| **5. Frontend Layer** | UI controls, HUD, user interactions | `app.js`, `app/controls.js`, `app/debug.js`, `index.html`, `style.css` |
-| **6. AI Director Layer** 🆕 | Gemini Live WebSocket client, semantic overrides, hand occlusion recovery | `app/gemini-client.js`, `app/gemini-live-throttler.js`, `app/profiler.js` |
-| **7. Advanced Features** | Privacy, recording, lifting mode, test suite | `app/privacy.js`, `recorder.js`, `lifting/`, `testing/` |
+| **4. Real-Time Layer** | Avatar bone driving, IK, expressions, 3D lifting, animations | `avatar/index.js`, `avatar/drivers.js`, `avatar/expressions.js`, `avatar/overrides.js`, `avatar/lifting.js`, `avatar/props.js` |
+| **5. Frontend Layer** | UI controls, HUD profiler, user interactions | `app.js`, `app/controls.js`, `app/debug.js`, `index.html`, `style.css` |
+| **6. AI Director Layer** | Gemini Live WebSocket client, semantic overrides, hand occlusion recovery | `app/gemini-client.js`, `app/gemini-live-throttler.js`, `app/profiler.js` |
+| **7. Advanced Features** | Privacy masking, recording, ONNX 3D lifting worker, test suite | `app/privacy.js`, `recorder.js`, `app/poseLifter.js`, `app/poseLifterWorker.js`, `lifting/`, `testing/`, `tests/` |
 
 ---
 
 ## 📁 Complete File Inventory & Role Descriptions
 
-### 🆕 AI Director Layer (Gemini Live API)
+### AI Director Layer (Gemini Live API)
 
 | File | Lines | Role |
 |---|---|---|
-| `app/gemini-client.js` | ~220 | WebSocket client for Gemini ER-2 Streaming API. Handles setup, heartbeats, tool calls (`set_emotion`, `spawn_prop`, `trigger_gesture`, `set_hand_ik_target`, `ack`). Auto-reconnects on drops. |
-| `app/gemini-live-throttler.js` | ~45 | 1 FPS JPEG throttler. Draws webcam frames to offscreen canvas, converts to base64, fires `onHeartbeat` callback. Disposes cleanly on camera flip. |
-| `app/profiler.js` | ~80 | Diagnostic HUD overlay. Tracks FPS, inference latency, GPU memory, and Gemini connection status (🔴 Offline / 🟢 Live). |
+| `app/gemini-client.js` | ~270 | WebSocket client for Gemini ER-2 Streaming API (`gemini-robotics-er-2-streaming-preview`). Handles setup, heartbeats, tool calls (`trigger_gesture`, `set_hand_ik_target`, `spawn_prop`, `ack`). Auto-reconnects on session limits / drops. Features `pendingTurn` lock, `turnComplete: true`, socket injection for testing, and strict tool argument validation. |
+| `app/gemini-live-throttler.js` | ~220 | **1 FPS JPEG Throttler:** Async encoding, dynamic aspect ratio sizing, frame deduplication via perceptual hash, CORS-safe `toBlob`, debug PiP view. Reads raw webcam (not privacy overlay) for AI Director. SSR/node guard in constructor. |
+| `app/profiler.js` | ~98 | Diagnostic HUD overlay. Tracks FPS, inference latency, GPU memory, Gemini connection status (🔴 Offline / 🟢 Live), and recent tool dispatches. |
 
 ### Core Tracker Files
 
 | File | Lines | Role |
 |---|---|---|
-| `tracker/index.js` | 227 | Main tracker class — preset auto-detection, MediaPipe initializer, WebGL probe with context cleanup (`WEBGL_lose_context`) |
-| `tracker/face.js` | ~180 | `extractFace()` — yaw/pitch/roll, **de-crossed eye gaze** (dead zone + outward bias), mouth open, blendshapes |
+| `tracker/index.js` | 227 | Main tracker class — preset auto-detection (`low`/`medium`/`high`), MediaPipe initializer, `detectPreset()` GPU probe, `WEBGL_lose_context` immediate cleanup after detection. Supports `?preset=videoPose3d` override. |
+| `tracker/face.js` | ~180 | `extractFace()` — yaw/pitch/roll (Y-axis aligned to Three.js), **de-crossed eye gaze** (dead zone + outward bias), mouth open, blendshapes |
 | `tracker/body.js` | 223 | `extractFullBody()` — shoulder/hip width, torso rotation, limb angles, mode detection |
 | `tracker/hands.js` | ~200 | `extractHand()` — 21 landmarks per hand, finger curl values |
 | `tracker/constants.js` | 75 | FACE/POSE/HAND landmark index constants |
@@ -58,16 +59,17 @@ The project now follows a **7-layer architecture**. The new Layer 6 (AI Director
 
 | File | Lines | Role |
 |---|---|---|
-| `avatar/index.js` | ~330 | Main `AvatarController` — semantic override state machine (`handOverrides`, `activeGestures`), `setEmotion()`, `triggerGesture()`, `setHandIKTarget()`, `spawnProp()`, WebGL context loss handling |
+| `avatar/index.js` | ~370 | Main `AvatarController` — semantic override state machine (`handOverrides`, `activeGestures`), mode stabilization hysteresis, WebGL context loss recovery, lifted 3D pose integration, and `_applySemanticOverrides()` execution. |
 | `avatar/bones.js` | ~200 | `findAllBones()`, `captureRestPose()`, rest pose data |
 | `avatar/drivers.js` | ~400 | `driveHead()`, `driveEyes()` (with anatomical yaw/pitch limits), `driveTorso()`, `driveHips()`, `driveLimbs()`, `driveFingers()` (with anatomically-correct per-joint curl limits) |
-| `avatar/overrides.js` 🆕 | ~120 | **NEW:** Analytic 2-bone IK solver, gesture pose library (`peace_sign`, `thumbs_up`, `pointing`, `open_palm`, `rock_on`), procedural grip pose, IK anchor table |
-| `avatar/props.js` 🆕 | ~80 | **NEW:** `PropManager` class — spawns/despawns 3D props, attaches to hand bones with grip offsets, tracks held state |
+| `avatar/overrides.js` | ~120 | Analytic 2-bone IK solver, gesture pose library (`peace_sign`, `thumbs_up`, `pointing`, `open_palm`, `rock_on`), procedural grip pose, IK anchor table (`hip`, `mouth`, `behind_back`, `chin`, `chest`, `release`) |
+| `avatar/props.js` | ~80 | `PropManager` class — spawns/despawns 3D props, attaches to hand bones with grip offsets, tracks held state |
+| `avatar/lifting.js` | ~75 | Maps ONNX-lifted 17 COCO 3D joints to VRM skeleton basis with anatomical coordinate alignment. |
 | `avatar/expressions.js` | ~100 | Expression shape mapping |
-| `avatar/gaze.js` 🆕 | ~60 | **NEW:** `EyeGazeSolver` class — normalized iris offsets, dead zone (microsaccade filter), de-crossing bias (cancels screen convergence) |
-| `avatar/loader.js` | ~80 | `loadVRM()`, `measureModel()` |
-| `avatar/target.js` | ~80 | `_visiblePlane()`, `computeTarget()` |
-| `avatar/constants.js` | ~80 | Bone/finger/face index constants |
+| `avatar/gaze.js` | ~60 | `EyeGazeSolver` class — normalized iris offsets, dead zone (microsaccade filter), de-crossing bias (cancels screen convergence) |
+| `avatar/loader.js` | ~130 | `loadVRM()` with VRM 0/1 support + fallback humanoid skeleton detector for standard GLTF/GLB models, `measureModel()` |
+| `avatar/target.js` | ~75 | Camera ray unprojection for 2D-to-3D screen mapping with dynamic depth scaling based on eye distance. |
+| `avatar/constants.js` | ~80 | Bone/finger/face index constants & reusable math scratch objects (`_v3a`, `_qa`, etc.) |
 
 ### Core Filter Files
 
@@ -77,38 +79,32 @@ The project now follows a **7-layer architecture**. The new Layer 6 (AI Director
 | `filters/oneEuro.js` | 212 | `OneEuroFilter`, `OneEuroFilterPose`, `OneEuroFilterVec3` |
 | `filters/kalman.js` | 75 | `KalmanFilter1D`, `KalmanFilterVec3` |
 
-### Core App Files
+### Core App & Lifting Files
 
 | File | Lines | Role |
 |---|---|---|
-| `app.js` | 154 | Main entry — imports controls, exposes test functions |
-| `app/init.js` | ~170 | Starts camera, creates `Tracker` and `AvatarController`, **initializes Gemini client + throttler + profiler**, wires all semantic override callbacks |
-| `app/controls.js` | 154 | All UI event handlers |
-| `app/loop.js` | ~100 | Animation loop, FPS tracking |
+| `app.js` | 154 | Main entry — imports controls, exposes test functions (`runPhase1Tests`, `testHeadSigns`, etc.) |
+| `app/init.js` | ~240 | Starts camera, initializes `Tracker`, `AvatarController`, `PoseLifter`, `GeminiLiveClient`, `GeminiLiveThrottler`, and `PerformanceProfiler`. Handles camera flip and callback wiring. |
+| `app/controls.js` | 154 | UI event handlers (start/stop, flip, mirror, record, settings, toggles) |
+| `app/loop.js` | ~75 | Animation loop, FPS tracking, fire-and-forget `PoseLifter` worker dispatch, avatar update/render dispatch. |
+| `app/poseLifter.js` | ~120 | Asynchronous main-thread wrapper for ONNX Web Worker pose lifting with bounded resolve queue. |
+| `app/poseLifterWorker.js` | ~50 | Web Worker running `onnxruntime-web` inference on 256x256 normalized crop. |
 | `app/debug.js` | 48 | `formatDebugHUD()` |
-| `app/privacy.js` | 94 | Person privacy masking |
+| `app/privacy.js` | 94 | Person privacy masking (`PERSON_THRESHOLD = 127`) |
 
-### Testing
+### Testing & Standalone
 
 | File | Role |
 |---|---|
-| `testing/phase1.js` | 20 tests (T01–T20) — full test suite |
-| `testing/hands.js` | Hand-specific tests |
-| `testing/boneInspector.js` | Bone rotation diagnostic tool |
-| `testing/gaze.js` 🆕 | **NEW:** Mock pipeline test for `EyeGazeSolver` — feeds synthetic landmarks, validates dead zone, clamping, de-crossing bias |
-
-### Research & Assets
-
-| Directory | Contents |
-|---|---|
-| `research papers/` | 17 academic papers on pose tracking, FlexPoseNet, ZoeDepth |
-| `models/` | MediaPipe task files + VRM models (`avatar.vrm`, `miku_skeleton.json` baked data) |
-| `avatar/` | VRM model files |
-| `kinematics/` | Constraint, contact, Hybrik kinematics files |
-| `lifting/` | Lifting-related code |
-| `filters/` | Smoothing filter implementations |
-| `tracker/` | MediaPipe integration |
-| `testing/` | Test suite |
+| `tests/gemini/gemini-client.stress.test.js` | 10 Vitest stress scenarios (reconnect storms, pendingTurn lock, malformed payload gauntlets, tool floods, 10-minute soak) |
+| `tests/gemini/fake-server.js` | Mock Gemini WebSocket server for automated testing without API keys |
+| `tests/drivers.test.js` | Driver fallback & joint rotation tests |
+| `tests/geminiThrottler.test.js` | Throttler lifecycle and resource disposal tests |
+| `tests/poseLifter.test.js` | Queue capping and worker communication tests |
+| `tests/webglContext.test.js` | WebGL context loss/restoration handling tests |
+| `testing/phase1.js` | In-browser 20-test runtime verification suite (T01–T20) |
+| `testing/gaze.js` | Mock pipeline test for `EyeGazeSolver` |
+| `standalone/` | Isolated lightweight Gemini Live API app and `stress.mjs` test script |
 
 ---
 
@@ -119,6 +115,7 @@ The AI Director uses a **hybrid architecture** that divides labor by latency and
 | Component | Responsibility | Latency |
 |---|---|---|
 | **MediaPipe (Local)** | Frame-by-frame joint coordinates (face, body, hands) | 16ms (60 FPS) |
+| **PoseLifter (Local Worker)** | 3D root-relative coordinate lifting from 2D crops | ~20–40ms (non-blocking) |
 | **Gemini ER-2 (Cloud)** | Semantic intent (occlusions, gestures, prop interactions) | 200–800ms (1 FPS) |
 
 ### The Heartbeat Pattern
@@ -128,10 +125,13 @@ Every second, the throttler sends a JPEG frame + text prompt to Gemini:
 ```javascript
 {
   clientContent: {
-    turns: [{ role: "user", parts: [
-      { inlineData: { data: base64Jpeg, mimeType: "image/jpeg" } },
-      { text: "[HEARTBEAT] Observe the user's hands..." }
-    ]}],
+    turns: [{
+      role: "user",
+      parts: [
+        { inlineData: { data: base64Jpeg, mimeType: "image/jpeg" } },
+        { text: "[HEARTBEAT] Observe the user's hands..." }
+      ]
+    }],
     turnComplete: true
   }
 }
@@ -141,19 +141,10 @@ Gemini responds with **tool calls** that override local tracking when needed:
 
 | Tool | Trigger Condition | Local Action |
 |---|---|---|
-| `trigger_gesture` | Clear hand sign detected | Applies pre-baked pose (`peace_sign`, `thumbs_up`, etc.) for 3 seconds |
+| `trigger_gesture` | Clear hand sign detected | Applies pre-baked pose (`peace_sign`, `thumbs_up`, etc.) |
 | `set_hand_ik_target` | Hand occluded / behind back / holding object | Switches to analytic 2-bone IK targeting body anchor (`hip`, `chest`, `mouth`, `behind_back`, `chin`, `release`) |
 | `spawn_prop` | User holding real-world object | Attaches 3D prop mesh to hand bone + activates procedural grip |
 | `ack` | No action needed | Silent acknowledgment, MediaPipe continues |
-
-### Token Budget (Gemini ER-2)
-
-| Metric | Value |
-|---|---|
-| Video input rate | 1 FPS JPEG (~3.5k image tokens/frame) |
-| Text heartbeat | ~2.4k tokens/beat |
-| Session limit | 2 minutes (video+audio) → auto-reconnect required |
-| Recommended `mediaResolution` | `MEDIA_RESOLUTION_LOW` (saves ~60% tokens) |
 
 ---
 
@@ -163,11 +154,11 @@ Three performance tiers are auto-detected at startup:
 
 | Preset | GPU Target | Faces | Pose Model | Hands | Auto-detect Logic |
 |---|---|---|---|---|---|
-| `low` | Weak GPU / integrated | 1 | `pose_landmarker_lite.task` | 0 | No WebGL2 → low; Intel HD/GMA/Mesa → low |
-| `medium` | Good mobile GPU | 1 | `pose_landmarker_full.task` | 2 | Adreno/Mali/Apple GPU → medium |
+| `low` | Weak GPU / integrated | 1 | `pose_landmarker_lite.task` | 0 | No WebGL2 -> low; Intel HD/GMA/Mesa -> low |
+| `medium` | Good mobile GPU | 1 | `pose_landmarker_full.task` | 2 | Adreno/Mali/Apple GPU -> medium |
 | `high` | Phone / powerful GPU | 4 | `pose_landmarker_full.task` | 2 | Default when GPU is capable |
 
-**NEW:** GPU probe now calls `WEBGL_lose_context` immediately after detection to prevent context exhaustion.
+*Note:* GPU probe calls `WEBGL_lose_context` immediately after detection to prevent context exhaustion.
 
 ---
 
@@ -177,140 +168,35 @@ Three performance tiers are auto-detected at startup:
 |---|---|---|
 | **GPU** — Adreno/Mali mobile GPUs | WebGL2 performance varies | Use `"medium"` preset; cap resolution at 640×480 |
 | **Memory** — 2–4 GB typical | VRM + WASM + WebGL contexts can exceed budget | `VRMUtils.deepDispose` on unload; `loseContext` on HMR; throttle 1 FPS to Gemini |
-| **CPU** — Kryo/A78 | MediaPipe dominates CPU budget | OneEuro filtering reduces jitter without extra passes |
-| **WebGL Contexts** — Limited to ~16 per process | Hot-reload leaks contexts → `kGpuService` crash | Probe releases context; HMR `dispose()` handler added |
-| **Battery** — Sustained inference drains fast | Gemini WebSocket adds network overhead | 1 FPS heartbeat only; `MEDIA_RESOLUTION_LOW` reduces token cost |
+| **CPU** — Kryo/A78 | MediaPipe dominates CPU budget | OneEuro filtering reduces jitter without extra passes; PoseLifter offloaded to worker |
+| **WebGL Contexts** — Limited to ~16 per process | Hot-reload leaks contexts -> `kGpuService` crash | Probe releases context; WebGL context loss listener pauses loop gracefully |
+| **Battery** — Sustained inference drains fast | Gemini WebSocket adds network overhead | 1 FPS heartbeat only with frame deduplication |
 
 ---
 
-## ⚡ Performance Optimizations
+## 🧪 Test Suite Reference
 
-### Local Pipeline
-1. **Resolution cap** — `{ ideal: 640×480 }` for medium-tier
-2. **Filter smoothing** — OneEuro adaptive low-pass
-3. **Per-frame throttling** — `loop.js:tick` caps `dt` to 0.1s
-4. **VRM pixel ratio** — `Math.min(window.devicePixelRatio, 2)`
-5. **Bone rest pose** — Precomputed, avoids per-frame inverse calculations
-6. **Expression batching** — Single pass through blendshapes
-7. **Reusable temp objects** — `_v3a`, `_v3b`, `_qa`, `_qb`, `_euler` in `avatar/constants.js`
-8. **WebGL context hygiene** — Probe releases context; HMR cleanup
+### Automated Tests (CLI)
+```bash
+npm test
+```
+Runs 16 unit, integration, and stress tests across 5 test suites.
 
-### AI Director Pipeline
-9. **1 FPS heartbeat** — Only 1 frame/second sent to Gemini (vs 60 FPS local)
-10. **`MEDIA_RESOLUTION_LOW`** — Reduces image token cost by ~60%
-11. **`pendingTurn` lock** — Prevents heartbeat from interrupting in-flight model responses
-12. **Auto-reconnect** — Restores session after 2-minute limit or network drop
-13. **Semantic-only AI** — Local models handle face/body; AI only handles hard cases (occlusions, gestures)
-
----
-
-## 🧪 Test Suite
-
-### Running Tests
-```js
-window.runPhase1Tests();      // Full 20-test suite
+### In-Browser Diagnostics
+```javascript
+window.runPhase1Tests();      // Full 20-test suite (T01–T20)
 window.testHeadSigns();      // Calibrate head sign directions
 window.testFilterQuality();  // Measure filter jitter
 window.testHands();          // Hand tracking accuracy
 window.testFingerDriver();   // Force fist to test bone rotation
-window.testGaze();           // 🆕 Validate EyeGazeSolver
+window.testGaze();           // Validate EyeGazeSolver
 window.openBoneInspector();  // Live bone rotation tool
 ```
 
-### Test Coverage
-- **T01–T08:** Camera, resolution, MediaPipe init, filters, avatar load, bones, smoothing
-- **T09–T14:** VRM meta, bone availability, FPS, camera flip, privacy mask
-- **T15–T20:** Advanced features, expression mapping, gesture detection
-
 ---
 
-## 🐛 Debugging on Device
+## 🔐 Security & Deployment Notes
 
-### Common Console Checks
-
-```js
-// Local tracking
-console.log("Running:", state.running);
-console.log("Preset:", window.tracker?.preset?.label);
-console.log("Avatar state:", window.avatar?.state);
-console.log("FPS:", Math.round(frames / ((now - fpsTime) / 1000)));
-
-// AI Director
-console.log("Gemini connected:", state.geminiClient?.isConnected);
-console.log("Hand overrides:", window.avatar?.handOverrides);
-console.log("Active gestures:", window.avatar?.activeGestures);
-console.log("Held props:", window.avatar?.props?.held);
-
-// Gaze solver
-console.log("De-cross bias:", 0.12);
-console.log("Dead zone:", 0.04);
-
-// WebGL health
-const gl = document.querySelector('canvas')?.getContext('webgl2');
-console.log("WebGL contexts lost:", gl?.isContextLost());
-```
-
-### Common Issues
-
-| Symptom | Likely Cause | Fix |
-|---|---|---|
-| `kGpuService` / WebGL creation failed | Context exhaustion from HMR | Restart browser; add `loseContext` to probe |
-| Avatar looks crosseyed | Raw iris landmarks mapped directly | Use `EyeGazeSolver` with de-crossing bias |
-| Eyes jitter nervously | Microsaccades amplified | Increase `GAZE_DEAD_ZONE` to 0.05 |
-| Fingers don't close | Sign bug or PIP under-bent | Use anatomical `FINGER_JOINT_LIMITS` [1.55, 1.85, 0.85] |
-| Gemini never responds | Heartbeat missing `turnComplete: true` | Use `clientContent` (not `realtimeInput`) with `turnComplete` |
-| Gemini silent when idle | ER-2 only emits turns when action needed | Normal behavior; `ack` tool reduces noise |
-| `hand.handForward is not iterable` | Tracker returns `{x,y,z}` object, not array | Use `toVector3()` helper |
-
----
-
-## 📋 Deployment Checklist (Medium-Tier Android)
-
-- [ ] Default resolution ≤ 640×480
-- [ ] Preset auto-detects correctly
-- [ ] `window.runPhase1Tests()` all PASS/WARN-only
-- [ ] Avatar VRM loads without errors
-- [ ] FPS ≥ 20 on sustained run
-- [ ] Camera flip handles single-camera gracefully
-- [ ] `stopApp()` releases all tracks + Gemini client
-- [ ] VRM disposal runs on unload
-- [ ] WebGL context probe releases context
-- [ ] HMR cleanup disposes tracker + avatar
-- [ ] Gemini WebSocket connects + receives `setupComplete`
-- [ ] 1 FPS heartbeat fires (check network tab)
-- [ ] Tool calls (`set_hand_ik_target`, `trigger_gesture`) fire on occlusion/gestures
-- [ ] `EyeGazeSolver` reduces crosseyed look
-- [ ] Diagnostic HUD shows Gemini status (🟢 Live)
-
----
-
-## 🔐 Security Notes
-
-- **API key exposure:** `VITE_GEMINI_API_KEY` is embedded in client bundle. For production, use [ephemeral tokens](https://ai.google.dev/gemini-api/docs/ephemeral-tokens) via a backend proxy.
-- **Privacy mask:** `PERSON_THRESHOLD = 127` in `app/privacy.js` masks detected persons on the canvas overlay.
-- **CORS:** MediaPipe WASM files served from `/tracker/wasm/`; ensure CORS headers allow same-origin.
-
----
-
-## 🚀 Extension Points
-
-### Adding New Semantic Tools
-1. Add `functionDeclaration` to `gemini-client.js` setup payload
-2. Add callback to `GeminiLiveClient` constructor
-3. Wire callback in `app/init.js`
-4. Add state + method to `AvatarController`
-5. Apply in `_applySemanticOverrides()` after `driveLimbs`/`driveFingers`
-
-### Adding New Gestures
-1. Add enum value to `trigger_gesture` parameters
-2. Add pose to `GESTURE_POSES` in `avatar/overrides.js`
-3. Add to heartbeat prompt text
-
-### Adding New IK Anchors
-1. Add enum value to `set_hand_ik_target` parameters
-2. Add model-space coordinate to `ANCHORS` in `avatar/overrides.js`
-3. Add case to `applySemanticIK()` switch
-
-### Adding New Props
-1. Extend `_buildMesh()` in `avatar/props.js` with geometry for new prop names
-2. Gemini will auto-detect and spawn via `spawn_prop`
+- **API Keys:** `VITE_GEMINI_API_KEY` is supported for client-side evaluation. For production web hosting, proxy WebSocket traffic through an authentication backend using ephemeral session tokens.
+- **Privacy Masking:** Canvas overlay supports person segmentation masking (`PERSON_THRESHOLD = 127`) while throttler feeds raw camera frames directly to the AI director.
+- **CORS:** MediaPipe WASM and ONNX model files must be served with appropriate CORS / COOP / COEP headers when deploying multithreaded WASM.

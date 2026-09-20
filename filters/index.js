@@ -1,93 +1,29 @@
-import { OneEuroFilterPose, OneEuroFilter } from "./oneEuro.js";
-import { KalmanFilterVec3 } from "./kalman.js";
-
-// ============================================================
-// FilterPipeline
-//
-// Manages all filters for face, body, and hands.
-// Replaces all the manual lerp() calls in tracker/index.js.
-//
-// Usage:
-//   const pipeline = new FilterPipeline();
-//   pipeline.setFrequency(30); // call when FPS is known
-//
-//   // Each frame:
-//   const filteredFace = pipeline.filterFace(rawFace, ts);
-//   const filteredBody = pipeline.filterBody(rawBody, ts);
-// ============================================================
+import { OneEuroFilterPose, OneEuroFilter, OneEuroFilterVec3 } from "./oneEuro.js";
 
 export class FilterPipeline {
   constructor() {
-    // Default params: tune via setSmoothing()
     this._minCutoff = 1.0;
     this._beta = 0.007;
     this._freq = 30;
 
-    // Face rotation filter (yaw, pitch, roll)
-    this.faceRotation = new OneEuroFilterPose({
-      freq: this._freq,
-      minCutoff: 1.5, // face needs slightly more responsiveness
-      beta: 0.01,
-    });
+    this.faceRotation = new OneEuroFilterPose({ freq: this._freq, minCutoff: 1.5, beta: 0.01 });
+    this.facePosition = new OneEuroFilterPose({ freq: this._freq, minCutoff: 1.0, beta: 0.005 });
+    this.gaze = new OneEuroFilterPose({ freq: this._freq, minCutoff: 3.0, beta: 0.1 });
+    this.expression = new OneEuroFilterPose({ freq: this._freq, minCutoff: 2.0, beta: 0.02 });
+    this.bodyPosition = new OneEuroFilterPose({ freq: this._freq, minCutoff: 0.8, beta: 0.003 });
+    this.bodyRotation = new OneEuroFilterPose({ freq: this._freq, minCutoff: 1.0, beta: 0.007 });
 
-    // Face position filter (xNorm, yNorm, eyeDistance)
-    this.facePosition = new OneEuroFilterPose({
-      freq: this._freq,
-      minCutoff: 1.0,
-      beta: 0.005,
-    });
-
-    // Gaze filter (very responsive — eyes move fast)
-    this.gaze = new OneEuroFilterPose({
-      freq: this._freq,
-      minCutoff: 3.0,
-      beta: 0.1,
-    });
-
-    // Mouth / expression filter
-    this.expression = new OneEuroFilterPose({
-      freq: this._freq,
-      minCutoff: 2.0,
-      beta: 0.02,
-    });
-
-    // Body position filter
-    this.bodyPosition = new OneEuroFilterPose({
-      freq: this._freq,
-      minCutoff: 0.8,
-      beta: 0.003,
-    });
-
-    // Body rotation filter (torso, hips)
-    this.bodyRotation = new OneEuroFilterPose({
-      freq: this._freq,
-      minCutoff: 1.0,
-      beta: 0.007,
-    });
-
-    // Per-joint 3D position filters (body limbs)
     this._jointFilters = new Map();
-
-    // Finger curl filters
     this._fingerFilters = new Map();
-
-    // Kalman for occluded joints
-    this._kalmanJoints = new Map();
+    this._handVecFilters = new Map();
+    this._lastJoint = {};
   }
 
   setFrequency(hz) {
-    this._freq = hz;
+    this._freq = Math.max(1, hz);
   }
 
-  /**
-   * Map slider value (0-100) to filter parameters
-   * 0   = maximum smoothing (slow response)
-   * 100 = minimum smoothing (instant response)
-   */
   setSmoothing(sliderValue) {
-    // sliderValue 0..100
-    // minCutoff: 0.3 (very smooth) to 4.0 (very responsive)
-    // beta:      0.001 to 0.05
     const t = sliderValue / 100;
     this._minCutoff = 0.3 + t * 3.7;
     this._beta = 0.001 + t * 0.049;
@@ -99,81 +35,40 @@ export class FilterPipeline {
     this.expression.setParams(this._minCutoff * 2.0, this._beta * 2.0);
   }
 
-  // ── Face ──────────────────────────────────────────────────
-
   filterFace(face, ts) {
     if (!face) return null;
-
-    const rot = this.faceRotation.filter({
-      yaw: face.yaw,
-      pitch: face.pitch,
-      roll: face.roll,
-    }, ts);
-
+    const rot = this.faceRotation.filter({ yaw: face.yaw, pitch: face.pitch, roll: face.roll }, ts);
     const pos = this.facePosition.filter({
-      x: face.x,
-      y: face.y,
-      xNorm: face.xNorm,
-      yNorm: face.yNorm,
-      eyeDistance: face.eyeDistance,
-      eyeDistanceNorm: face.eyeDistanceNorm,
+      x: face.x, y: face.y, xNorm: face.xNorm, yNorm: face.yNorm,
+      eyeDistance: face.eyeDistance, eyeDistanceNorm: face.eyeDistanceNorm,
     }, ts);
-
-    const expr = this.expression.filter({
-      mouthOpen: face.mouthOpen,
-    }, ts);
-
+    const expr = this.expression.filter({ mouthOpen: face.mouthOpen }, ts);
     let gaze = face.gaze;
     if (gaze) {
       gaze = this.gaze.filter({
-        leftX: gaze.leftX,
-        leftY: gaze.leftY,
-        rightX: gaze.rightX,
-        rightY: gaze.rightY,
+        leftX: gaze.leftX, leftY: gaze.leftY, rightX: gaze.rightX, rightY: gaze.rightY,
       }, ts);
     }
-
-    return {
-      ...face,
-      ...rot,
-      ...pos,
-      ...expr,
-      gaze,
-    };
+    return { ...face, ...rot, ...pos, ...expr, gaze };
   }
-
-  // ── Body ──────────────────────────────────────────────────
 
   filterBody(body, ts) {
     if (!body) return null;
-
     const pos = this.bodyPosition.filter({
-      shoulderMidX: body.shoulderMidX,
-      shoulderMidY: body.shoulderMidY,
-      shoulderMidXNorm: body.shoulderMidXNorm,
-      shoulderMidYNorm: body.shoulderMidYNorm,
-      shoulderWidth: body.shoulderWidth,
-      shoulderWidthNorm: body.shoulderWidthNorm,
-      shoulderTilt: body.shoulderTilt,
-      hipTilt: body.hipTilt || 0,
+      shoulderMidX: body.shoulderMidX, shoulderMidY: body.shoulderMidY,
+      shoulderMidXNorm: body.shoulderMidXNorm, shoulderMidYNorm: body.shoulderMidYNorm,
+      shoulderWidth: body.shoulderWidth, shoulderWidthNorm: body.shoulderWidthNorm,
+      shoulderTilt: body.shoulderTilt, hipTilt: body.hipTilt || 0,
     }, ts);
 
     let torso = body.torso;
     if (torso) {
-      torso = {
-        ...torso,
-        ...this.bodyRotation.filter({
-          torsoYaw: torso.yaw,
-          torsoPitch: torso.pitch,
-          torsoRoll: torso.roll,
-        }, ts),
-      };
-      torso.yaw = torso.torsoYaw;
-      torso.pitch = torso.torsoPitch;
-      torso.roll = torso.torsoRoll;
+      const ft = this.bodyRotation.filter({
+        torsoYaw: torso.yaw, torsoPitch: torso.pitch, torsoRoll: torso.roll,
+      }, ts);
+      torso = { ...torso, yaw: ft.torsoYaw, pitch: ft.torsoPitch, roll: ft.torsoRoll };
     }
 
-    // Filter per joint
     let joints3d = body.joints3d;
     if (joints3d) {
       joints3d = {};
@@ -181,72 +76,73 @@ export class FilterPipeline {
         joints3d[name] = this._filterJoint(name, joint, body, ts);
       }
     }
-
-    return {
-      ...body,
-      ...pos,
-      torso,
-      joints3d,
-    };
+    return { ...body, ...pos, torso, joints3d };
   }
 
   _filterJoint(name, joint, body, ts) {
-    // Get or create filter pair for this joint
-    if (!this._jointFilters.has(name)) {
-      this._jointFilters.set(name, new OneEuroFilterPose({
-        freq: this._freq,
-        minCutoff: this._minCutoff,
-        beta: this._beta,
-      }));
-      this._kalmanJoints.set(name, new KalmanFilterVec3(0.01, 0.0001));
+    let f = this._jointFilters.get(name);
+    if (!f) {
+      f = new OneEuroFilterPose({ freq: this._freq, minCutoff: this._minCutoff, beta: this._beta });
+      this._jointFilters.set(name, f);
     }
-
-    const oeFilter = this._jointFilters.get(name);
-    const kalman = this._kalmanJoints.get(name);
-
-    // Check visibility
     const j2d = body.joints2d?.[name];
-    const isVisible = !j2d || j2d.visibility > 0.3;
-
-    if (isVisible) {
-      // Joint visible: filter with OneEuro + feed Kalman
-      const filtered = oeFilter.filter({
-        x: joint.x, y: joint.y, z: joint.z,
-      }, ts);
-      kalman.filter(filtered); // keep Kalman state warm
-      return filtered;
-    } else {
-      // Joint occluded: use Kalman prediction
-      return kalman.predict();
+    if (!j2d || j2d.visibility > 0.3) {
+      const out = f.filter({ x: joint.x, y: joint.y, z: joint.z }, ts);
+      this._lastJoint[name] = out;
+      return out;
     }
+    const last = this._lastJoint[name];
+    return last ? { x: last.x * 0.98, y: last.y * 0.98, z: last.z * 0.98 } : null;
   }
-
-  // ── Hands ─────────────────────────────────────────────────
 
   filterHands(hands, ts) {
     if (!hands) return null;
-
     const result = {};
 
     for (const [side, hand] of Object.entries(hands)) {
       const filteredFingers = {};
 
-      for (const [fingerName, finger] of Object.entries(hand.fingers)) {
-        const key = `${side}_${fingerName}`;
-        if (!this._fingerFilters.has(key)) {
-          this._fingerFilters.set(key, new OneEuroFilter(
-            this._freq,
-            2.0, // fingers need more responsiveness
-            0.03
-          ));
+      for (const [fingerName, fData] of Object.entries(hand.fingers || {})) {
+        const prefix = `${side}_${fingerName}`;
+        if (!this._fingerFilters.has(`${prefix}_curl`)) {
+          this._fingerFilters.set(`${prefix}_curl`, new OneEuroFilter(this._freq, 2.5, 0.03));
+          this._fingerFilters.set(`${prefix}_mcp`, new OneEuroFilter(this._freq, 2.5, 0.03));
+          this._fingerFilters.set(`${prefix}_pip`, new OneEuroFilter(this._freq, 2.5, 0.03));
+          this._fingerFilters.set(`${prefix}_opp`, new OneEuroFilter(this._freq, 2.0, 0.02));
         }
+
         filteredFingers[fingerName] = {
-          ...finger,
-          curl: this._fingerFilters.get(key).filter(finger.curl, ts),
+          ...fData,
+          curl: this._fingerFilters.get(`${prefix}_curl`).filter(fData.curl ?? 0, ts),
+          mcp: fData.mcp !== undefined ? this._fingerFilters.get(`${prefix}_mcp`).filter(fData.mcp, ts) : undefined,
+          pip: fData.pip !== undefined ? this._fingerFilters.get(`${prefix}_pip`).filter(fData.pip, ts) : undefined,
+          opposition: fData.opposition !== undefined ? this._fingerFilters.get(`${prefix}_opp`).filter(fData.opposition, ts) : undefined,
         };
       }
 
-      result[side] = { ...hand, fingers: filteredFingers };
+      const fwdKey = `${side}_fwd`;
+      const normKey = `${side}_norm`;
+      if (!this._handVecFilters.has(fwdKey)) {
+        this._handVecFilters.set(fwdKey, new OneEuroFilterVec3(this._freq, 2.0, 0.02));
+        this._handVecFilters.set(normKey, new OneEuroFilterVec3(this._freq, 2.0, 0.02));
+      }
+
+      const rawFwd = hand.handForward ? this._handVecFilters.get(fwdKey).filter(hand.handForward, ts) : null;
+      const rawNorm = hand.palmNormal ? this._handVecFilters.get(normKey).filter(hand.palmNormal, ts) : null;
+
+      let handForward = rawFwd;
+      if (handForward) {
+        const l = Math.hypot(handForward.x, handForward.y, handForward.z) || 1;
+        handForward = { x: handForward.x / l, y: handForward.y / l, z: handForward.z / l };
+      }
+
+      let palmNormal = rawNorm;
+      if (palmNormal) {
+        const l = Math.hypot(palmNormal.x, palmNormal.y, palmNormal.z) || 1;
+        palmNormal = { x: palmNormal.x / l, y: palmNormal.y / l, z: palmNormal.z / l };
+      }
+
+      result[side] = { ...hand, handForward, palmNormal, fingers: filteredFingers };
     }
 
     return result;
@@ -260,7 +156,7 @@ export class FilterPipeline {
     this.bodyPosition.reset();
     this.bodyRotation.reset();
     for (const f of this._jointFilters.values()) f.reset();
-    for (const f of this._kalmanJoints.values()) f.reset();
     for (const f of this._fingerFilters.values()) f.reset();
+    for (const f of this._handVecFilters.values()) f.reset();
   }
 }
